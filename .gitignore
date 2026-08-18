@@ -1,0 +1,63 @@
+# Python and local development environments
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.test-tmp*/
+.verification/
+
+# Local-only tests requested for this repository
+tests/
+quick-test.cmd
+
+# Build and release output
+build/
+dist/
+release-models/
+artifacts/
+*.exe
+*.msi
+*.zip
+
+# Model weights, conversion output, and compiled caches
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.xml
+*.bin
+compiled_cache/
+.cache/
+
+# Local application data
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.usearch
+thumbnails/
+logs/
+ocr-diagnostic-preview.png
+
+# Credentials, signing material, and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.snk
+*.cer
+*.crt
+*.sig
+
+# Editor and operating-system state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

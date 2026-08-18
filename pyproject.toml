@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visual-search"
+version = "1.0.0"
+description = "Local-first visual search for Windows"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.26,<3",
+  "Pillow>=10.4",
+  "PySide6>=6.8",
+  "openvino>=2026.2,<2027",
+  "openvino-genai>=2026.2,<2027",
+  "opencv-python-headless>=4.10",
+  "PyYAML>=6.0",
+  "pyclipper>=1.3",
+  "shapely>=2.0",
+  "huggingface-hub>=0.27",
+  "transformers>=5.2,<6",
+  "optimum-intel @ https://github.com/huggingface/optimum-intel/archive/c1efc7dc3e6650ae7bf68fdab7488f2261400c98.zip",
+  "torch>=2.7,<3",
+  "torchvision>=0.22,<1",
+  "sentencepiece>=0.2",
+  "usearch>=2.16",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.11"]
+convert = ["accelerate>=1.2", "nncf>=2.18"]
+test = ["pytest>=8.3"]
+
+[project.scripts]
+visual-search = "visual_search.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+visual_search = ["resources/*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
