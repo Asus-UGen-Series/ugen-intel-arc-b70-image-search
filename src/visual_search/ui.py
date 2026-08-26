@@ -340,11 +340,15 @@ class StatusCard(QFrame):
     def __init__(self, title: str, state: str, detail: str, tone: str = "ok"):
         super().__init__()
         self.setObjectName(f"statusCard_{tone}")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(6)
         title_label = QLabel(title)
         title_label.setObjectName("statusTitle")
         state_label = QLabel(state)
         state_label.setObjectName(f"statusValue_{tone}")
+        state_label.setWordWrap(True)
         detail_label = QLabel(detail)
         detail_label.setObjectName("statusDetail")
         detail_label.setWordWrap(True)
@@ -596,8 +600,15 @@ class MainPage(QWidget):
         self.tabs.addTab(self.ocr_diagnostics, "OCR 診斷")
         self.models_page = QWidget()
         self.models_layout = QVBoxLayout(self.models_page)
+        self.models_layout.setContentsMargins(14, 14, 14, 18)
+        self.models_layout.setSpacing(12)
         self.models_layout.setAlignment(Qt.AlignTop)
-        self.tabs.addTab(self.models_page, "模型與效能")
+        self.models_scroll = QScrollArea()
+        self.models_scroll.setObjectName("modelsScroll")
+        self.models_scroll.setFrameShape(QFrame.NoFrame)
+        self.models_scroll.setWidgetResizable(True)
+        self.models_scroll.setWidget(self.models_page)
+        self.tabs.addTab(self.models_scroll, "模型與效能")
         self.refresh_model_status()
         layout.addWidget(self.tabs)
 
@@ -727,10 +738,20 @@ class MainPage(QWidget):
         self.object_profile_choice.setCurrentIndex(max(0, object_index))
         apply_object = QPushButton("套用物件模型")
         apply_object.clicked.connect(self.apply_object_settings)
+        import_object = QPushButton("匯入本機模型…")
+        import_object.clicked.connect(self.import_object_model)
         object_settings.addWidget(object_label)
         object_settings.addWidget(self.object_profile_choice, 1)
+        object_settings.addWidget(import_object)
         object_settings.addWidget(apply_object)
         self.models_layout.addLayout(object_settings)
+        self.object_model_path = QLabel()
+        self.object_model_path.setObjectName("modelPath")
+        self.object_model_path.setWordWrap(True)
+        self.object_model_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.object_profile_choice.currentIndexChanged.connect(self.update_object_model_path)
+        self.models_layout.addWidget(self.object_model_path)
+        self.update_object_model_path()
 
         settings_row = QHBoxLayout()
         self.vlm_profile_choice = QComboBox()
@@ -753,6 +774,10 @@ class MainPage(QWidget):
         self.models_layout.addLayout(settings_row)
 
         cards = QGridLayout()
+        cards.setHorizontalSpacing(12)
+        cards.setVerticalSpacing(12)
+        cards.setColumnStretch(0, 1)
+        cards.setColumnStretch(1, 1)
         info = detect_openvino_devices()
         accelerated = str(info.get("selected", "")).startswith("GPU")
         cards.addWidget(StatusCard(
@@ -797,11 +822,30 @@ class MainPage(QWidget):
         object_details = object_runtime[0] if object_runtime else {}
         vocabulary_size = int(object_details.get("vocabulary_size", 0) or 0)
         object_name = str(object_details.get("scale", self.config.active_object_profile)).upper()
+        active_object_manager = self.registry.object_manager(self.config.active_object_profile)
+        try:
+            self.registry.validate_object_directory(active_object_manager.root, self.config.active_object_profile)
+            object_package_ready = True
+        except (OSError, ValueError):
+            object_package_ready = active_object_manager.ready(verify_hashes=False)
+        if object_ready:
+            object_state = f"YOLOE-26 {object_name} Prompt-Free 已載入"
+            object_tone = "ok" if any(str(item).startswith("GPU") for item in object_devices) else "warning"
+        elif object_package_ready:
+            object_state = "模型已安裝，重新啟動後載入"
+            object_tone = "neutral"
+        else:
+            object_state = "尚未安裝"
+            object_tone = "warning"
+        object_detail = (
+            f"固定開放詞彙：{vocabulary_size:,} · 實際裝置：{', '.join(object_devices) or '—'}"
+            if object_ready else f"預期位置：{active_object_manager.root}"
+        )
         cards.addWidget(StatusCard(
             "物件辨識",
-            f"YOLOE-26 {object_name} Prompt-Free 已載入" if object_ready else "尚未安裝或載入失敗",
-            f"固定開放詞彙：{vocabulary_size:,} · 實際裝置：{', '.join(object_devices) or '—'}",
-            "ok" if any(str(item).startswith("GPU") for item in object_devices) else "warning",
+            object_state,
+            object_detail,
+            object_tone,
         ), 2, 0)
 
         vlm_runtime = getattr(self.search_service.reranker.engine, "runtime_details", lambda: [])() if self.search_service.reranker else []
@@ -827,6 +871,10 @@ class MainPage(QWidget):
         runtime_title.setObjectName("sectionTitle")
         self.models_layout.addWidget(runtime_title)
         runtime_grid = QGridLayout()
+        runtime_grid.setHorizontalSpacing(12)
+        runtime_grid.setVerticalSpacing(12)
+        runtime_grid.setColumnStretch(0, 1)
+        runtime_grid.setColumnStretch(1, 1)
         semantic_runtime = getattr(self.search_service.embeddings, "runtime_details", lambda: [])()
         for index, item in enumerate(ocr_runtime + semantic_runtime + object_runtime + vlm_runtime):
             devices = [str(device) for device in item.get("execution_devices", [])]
@@ -845,8 +893,17 @@ class MainPage(QWidget):
             )
         self.models_layout.addLayout(runtime_grid)
 
-        locations = QLabel(f"模型位置：{self.paths.models}\n索引與設定：{self.paths.root}")
+        locations = QLabel(
+            "模型根目錄：" + str(self.paths.models) + "\n"
+            "SigLIP2：" + str(self.model_manager.root) + "\n"
+            "PP-OCRv6：" + str(self.registry.manager("ocr_model").root) + "\n"
+            "YOLOE-26S：" + str(self.registry.object_manager("yoloe26s-pf").root) + "\n"
+            "YOLOE-26M：" + str(self.registry.object_manager("yoloe26m-pf").root) + "\n"
+            "Qwen3.5 INT8：" + str(self.registry.vlm_manager("qwen35-9b-int8").root) + "\n"
+            "索引與設定：" + str(self.paths.root)
+        )
         locations.setObjectName("locationBox")
+        locations.setWordWrap(True)
         locations.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.models_layout.addWidget(locations)
         legacy_yolo = self.paths.models / "yolo11m-openvino-fp16"
@@ -861,8 +918,8 @@ class MainPage(QWidget):
         buttons = QHBoxLayout()
         refresh = QPushButton("重新檢查狀態")
         refresh.clicked.connect(self.refresh_model_status)
-        open_folder = QPushButton("開啟資料位置")
-        open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.root))))
+        open_folder = QPushButton("開啟模型資料夾")
+        open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.models))))
         buttons.addWidget(refresh)
         buttons.addWidget(open_folder)
         buttons.addStretch()
@@ -877,24 +934,66 @@ class MainPage(QWidget):
         self.capability_banner.style().unpolish(self.capability_banner)
         self.capability_banner.style().polish(self.capability_banner)
 
+    def update_object_model_path(self):
+        if not hasattr(self, "object_profile_choice") or not hasattr(self, "object_model_path"):
+            return
+        profile_id = str(self.object_profile_choice.currentData())
+        manager = self.registry.object_manager(profile_id)
+        try:
+            self.registry.validate_object_directory(manager.root, profile_id)
+            state = "已安裝"
+        except (OSError, ValueError):
+            state = "尚未安裝"
+        self.object_model_path.setText(f"{state} · 模型資料夾：{manager.root}")
+
+    def import_object_model(self, _checked: bool = False) -> bool:
+        profile_id = str(self.object_profile_choice.currentData())
+        source = QFileDialog.getExistingDirectory(self, "選擇 YOLOE-26 OpenVINO 模型資料夾")
+        if not source:
+            archive, _ = QFileDialog.getOpenFileName(
+                self, "或選擇 YOLOE-26 OpenVINO ZIP", "", "ZIP (*.zip)"
+            )
+            source = archive
+        if not source:
+            return False
+        try:
+            target = self.registry.import_local_object(Path(source), profile_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "模型匯入失敗", str(exc))
+            return False
+        self.config.active_object_profile = profile_id
+        self.config.save(self.paths.config)
+        QMessageBox.information(
+            self,
+            "模型匯入完成",
+            f"模型已安全複製到：\n{target}\n\n重新啟動 Visual Search 後會以 OpenVINO 載入。",
+        )
+        self.refresh_model_status()
+        return True
+
     def apply_object_settings(self):
         profile_id = str(self.object_profile_choice.currentData())
         manager = self.registry.object_manager(profile_id)
-        local_ready = bool(
-            list(manager.root.glob("*.xml"))
-            and list(manager.root.glob("*.bin"))
-            and (manager.root / "metadata.yaml").is_file()
-        )
+        try:
+            self.registry.validate_object_directory(manager.root, profile_id)
+            local_ready = True
+        except (OSError, ValueError):
+            local_ready = False
         if not local_ready and not manager.ready(verify_hashes=False):
             if manager.configured():
                 if ModelSetupDialog(manager, self).exec() != QDialog.Accepted:
                     return
             else:
-                QMessageBox.warning(
+                answer = QMessageBox.question(
                     self,
-                    "模型來源尚未設定",
-                    "請先執行 YOLOE-26 WSL 轉換工具，或將 Hugging Face 固定版本寫入 models.json。",
+                    "尚未安裝物件模型",
+                    f"找不到所選 YOLOE-26 OpenVINO 模型。\n\n預期位置：\n{manager.root}\n\n"
+                    "若你已完成轉換或下載模型，可以現在匯入資料夾或 ZIP。要開始匯入嗎？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
                 )
+                if answer != QMessageBox.Yes or not self.import_object_model():
+                    return
                 return
         self.config.active_object_profile = profile_id
         self.config.save(self.paths.config)
@@ -961,7 +1060,9 @@ class MainWindow(QMainWindow):
 
 STYLES = """
 QWidget { font-family: 'Segoe UI'; font-size: 14px; color: #172033; background: #f7f8fb; }
+QLabel { background: transparent; }
 QLineEdit { background: white; border: 1px solid #d7dce5; border-radius: 9px; padding: 11px; }
+QComboBox { background: white; border: 1px solid #d7dce5; border-radius: 8px; padding: 9px 12px; min-height: 20px; }
 QPushButton { background: white; border: 1px solid #ccd3df; border-radius: 9px; padding: 10px 16px; }
 QPushButton:hover { border-color: #315efb; }
 QPushButton#primary { background: #315efb; color: white; border: none; font-weight: 600; }
@@ -978,8 +1079,10 @@ QLabel#statusValue_warning { color: #b54708; font-size: 19px; font-weight: 700; 
 QLabel#statusValue_error { color: #b42318; font-size: 19px; font-weight: 700; }
 QLabel#statusValue_neutral { color: #344054; font-size: 19px; font-weight: 700; }
 QLabel#statusDetail { color: #667085; font-size: 12px; }
-QLabel#locationBox { background: #f2f4f7; border-radius: 8px; padding: 12px; color: #475467; }
+QLabel#modelPath { color: #667085; font-size: 12px; padding: 0 2px 6px 2px; }
+QLabel#locationBox { background: white; border: 1px solid #e4e7ec; border-radius: 10px; padding: 14px; color: #475467; }
 QFrame#resultCard { background: white; border: 1px solid #e4e7ec; border-radius: 12px; min-width: 220px; max-width: 260px; }
-QFrame#statusCard_ok, QFrame#statusCard_warning, QFrame#statusCard_error, QFrame#statusCard_neutral { background: white; border: 1px solid #e4e7ec; border-radius: 12px; min-height: 105px; }
+QFrame#statusCard_ok, QFrame#statusCard_warning, QFrame#statusCard_error, QFrame#statusCard_neutral { background: white; border: 1px solid #e4e7ec; border-radius: 12px; min-height: 118px; }
+QScrollArea#modelsScroll { border: 0; background: #f7f8fb; }
 QTabWidget::pane { border: 0; }
 """

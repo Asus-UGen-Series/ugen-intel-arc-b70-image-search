@@ -9,6 +9,7 @@ import tempfile
 import threading
 import zipfile
 import stat
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -226,7 +227,7 @@ class ModelProfile:
 
 
 class ModelRegistry:
-    """Catalogues immutable factory models and safely managed local VLMs."""
+    """Catalogues immutable factory models and safely managed local models."""
 
     VLM_PROFILES = {
         "qwen35-9b-int8": ModelProfile(
@@ -322,6 +323,36 @@ class ModelRegistry:
             raise ValueError("缺少 OpenVINO vision model")
         return {"family": family, "required": required, "vision_models": [item.name for item in vision_xml]}
 
+    @classmethod
+    def validate_object_directory(cls, folder: Path, profile_id: str) -> dict[str, object]:
+        """Validate a converted YOLOE-26 prompt-free OpenVINO package."""
+        folder = Path(folder)
+        cls._reject_links(folder)
+        metadata_path = folder / "metadata.yaml"
+        if not metadata_path.is_file():
+            raise ValueError("缺少 metadata.yaml；請選擇完整的 YOLOE-26 OpenVINO 資料夾")
+        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+        xml_models = sorted(folder.glob("*.xml"))
+        paired_models = [path for path in xml_models if path.with_suffix(".bin").is_file()]
+        if not paired_models:
+            raise ValueError("找不到成對的 OpenVINO .xml 與 .bin 模型檔")
+        prompt_mode = str(metadata.get("prompt_mode", "")).casefold().replace("_", "-")
+        family = str(metadata.get("visual_search_family", "")).casefold()
+        if family and family != "yoloe26_pf":
+            raise ValueError(f"模型 family 不符：{family}")
+        if prompt_mode and prompt_mode != "prompt-free":
+            raise ValueError("只接受 YOLOE-26 Prompt-Free 模型")
+        expected_scale = "S" if profile_id == "yoloe26s-pf" else "M"
+        actual_scale = str(metadata.get("scale", "")).upper()
+        if actual_scale and actual_scale != expected_scale:
+            raise ValueError(f"選擇的是 YOLOE-26{expected_scale}，但匯入模型標示為 {actual_scale}")
+        return {
+            "profile_id": profile_id,
+            "scale": actual_scale or expected_scale,
+            "model": paired_models[0].name,
+            "prompt_mode": prompt_mode or "prompt-free",
+        }
+
     def import_local_vlm(self, source: Path) -> Path:
         source = Path(source)
         staging_parent = self.models_root / ".staging"
@@ -349,6 +380,46 @@ class ModelRegistry:
                 shutil.rmtree(temporary, ignore_errors=True)
             else:
                 temporary.replace(target)
+            return target
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def import_local_object(self, source: Path, profile_id: str) -> Path:
+        """Safely import a folder/ZIP into the selected factory object-model slot."""
+        source = Path(source)
+        manager = self.object_manager(profile_id)
+        staging_parent = self.models_root / ".staging"
+        staging_parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="yoloe-", dir=staging_parent))
+        try:
+            if source.is_file() and source.suffix.casefold() == ".zip":
+                with zipfile.ZipFile(source) as archive:
+                    archive.extractall(staging, members=self._safe_members(archive))
+                candidates = [staging, *[item for item in staging.rglob("*") if item.is_dir()]]
+                model_dir = next((item for item in candidates if (item / "metadata.yaml").is_file()), staging)
+            elif source.is_dir():
+                self._reject_links(source)
+                model_dir = source
+            else:
+                raise ValueError("請選擇 YOLOE-26 OpenVINO 模型資料夾或 ZIP")
+            self.validate_object_directory(model_dir, profile_id)
+            target = manager.root
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + ".new")
+            backup = target.with_name(target.name + ".previous")
+            shutil.rmtree(temporary, ignore_errors=True)
+            shutil.rmtree(backup, ignore_errors=True)
+            shutil.copytree(model_dir, temporary, ignore=shutil.ignore_patterns("compiled_cache"))
+            self.validate_object_directory(temporary, profile_id)
+            if target.exists():
+                target.replace(backup)
+            try:
+                temporary.replace(target)
+            except Exception:
+                if backup.exists() and not target.exists():
+                    backup.replace(target)
+                raise
+            shutil.rmtree(backup, ignore_errors=True)
             return target
         finally:
             shutil.rmtree(staging, ignore_errors=True)

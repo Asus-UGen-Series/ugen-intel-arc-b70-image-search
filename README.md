@@ -93,11 +93,19 @@ python3 scripts/convert-siglip2-openvino-wsl.py --force --install-local
 python3 scripts/convert-paddleocr-openvino-wsl.py --force --install-local
 ```
 
-YOLOE-26 Prompt-Free S／M 轉換（Ultralytics 與 ONNX Runtime 只存在 WSL 轉換環境）：
+YOLOE-26 Prompt-Free 轉換。Windows 可直接執行推薦的 S 模型轉換；依賴只會裝在被 Git 排除的 `artifacts/conversion-env-yoloe26`，不會污染應用程式 runtime：
+
+```cmd
+.\scripts\convert-yoloe26-openvino-windows.cmd
+```
+
+完成後會同時輸出至 `artifacts\hf\yoloe-26s-pf-openvino-fp16`，並安裝至 `%LOCALAPPDATA%\VisualSearch\models\yoloe-26s-pf-openvino-fp16`。重新啟動 Visual Search 即可載入。
+
+也可在 WSL 轉換 S／M：
 
 ```bash
 cd "/mnt/c/path/to/visual-search"
-python3 scripts/convert-yoloe26-openvino-wsl.py --scale both
+python3 scripts/convert-yoloe26-openvino-wsl.py --scale both --install-local
 ```
 
 輸出位於 `artifacts/hf/yoloe-26s-pf-openvino-fp16` 與 `artifacts/hf/yoloe-26m-pf-openvino-fp16`。ONNX 只作轉換結果比對，預設驗證後刪除，不會進入 runtime 或安裝包。上傳後分別以 `--section yoloe_s`、`--section yoloe_m` 固定 Hugging Face revision。

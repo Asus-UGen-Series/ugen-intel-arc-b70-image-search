@@ -108,6 +108,16 @@ class OpenVinoYoloEngine(ObjectDetector):
         boxes, scores, classes = parse_yoloe_outputs(outputs, self.confidence, len(self.labels))
         if not len(boxes):
             return []
+        visible = visible_box_mask(
+            boxes,
+            pad_x,
+            pad_y,
+            source.shape[1] * scale,
+            source.shape[0] * scale,
+        )
+        boxes, scores, classes = boxes[visible], scores[visible], classes[visible]
+        if not len(boxes):
+            return []
         nms = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), self.confidence, self.iou_threshold)
         indices = np.asarray(nms).reshape(-1).tolist() if len(nms) else []
         indices = sorted(indices, key=lambda index: float(scores[index]), reverse=True)[:self.max_detections]
@@ -155,6 +165,19 @@ def letterbox(source: np.ndarray, width: int, height: int) -> tuple[np.ndarray, 
     return tensor, scale, pad_x, pad_y
 
 
+def visible_box_mask(boxes: np.ndarray, pad_x: float, pad_y: float,
+                     content_width: float, content_height: float,
+                     minimum_size: float = 2.0) -> np.ndarray:
+    """Reject padded detections that do not cover real letterboxed pixels."""
+    if not len(boxes):
+        return np.zeros((0,), dtype=bool)
+    x1 = np.clip(boxes[:, 0], pad_x, pad_x + content_width)
+    y1 = np.clip(boxes[:, 1], pad_y, pad_y + content_height)
+    x2 = np.clip(boxes[:, 0] + boxes[:, 2], pad_x, pad_x + content_width)
+    y2 = np.clip(boxes[:, 1] + boxes[:, 3], pad_y, pad_y + content_height)
+    return ((x2 - x1) >= minimum_size) & ((y2 - y1) >= minimum_size)
+
+
 def parse_yoloe_outputs(outputs: list[np.ndarray], threshold: float,
                         class_count: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     arrays = [np.asarray(item) for item in outputs]
@@ -169,7 +192,9 @@ def parse_yoloe_outputs(outputs: list[np.ndarray], threshold: float,
             scores = score_tensor.astype(np.float32)
             classes = class_tensor.astype(np.int32)
             boxes = np.column_stack((xyxy[:, 0], xyxy[:, 1], xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]))
-            keep = scores >= threshold
+            finite = np.isfinite(boxes).all(axis=1) & np.isfinite(scores)
+            has_area = (boxes[:, 2] >= 2.0) & (boxes[:, 3] >= 2.0)
+            keep = (scores >= threshold) & finite & has_area
             return boxes[keep], scores[keep], classes[keep]
     candidates = [item for item in arrays if item.ndim in {2, 3}]
     if not candidates:
@@ -213,5 +238,10 @@ def parse_yolo_output(output: np.ndarray, threshold: float,
         center = values[:, :4]
         boxes = np.column_stack((center[:, 0] - center[:, 2] / 2, center[:, 1] - center[:, 3] / 2,
                                  center[:, 2], center[:, 3]))
-    keep = scores >= threshold
+    # Prompt-free end-to-end exports pad Top-K rows with zero-area boxes. The
+    # padding can retain a high sentinel score/class id after FP16 conversion,
+    # so confidence alone is not sufficient to identify a real detection.
+    finite = np.isfinite(boxes).all(axis=1) & np.isfinite(scores)
+    has_area = (boxes[:, 2] >= 2.0) & (boxes[:, 3] >= 2.0)
+    keep = (scores >= threshold) & finite & has_area
     return boxes[keep].astype(np.float32), scores[keep].astype(np.float32), classes[keep]
