@@ -548,6 +548,34 @@ class SQLiteAssetRepository(AssetRepository):
         rows = self._connection().execute("SELECT status,count(*) count FROM assets GROUP BY status").fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
+    def index_coverage(self) -> dict[str, object]:
+        """Compact index coverage snapshot used by the developer search trace."""
+        db = self._connection()
+        stages: dict[str, dict[str, int]] = {}
+        for row in db.execute(
+            "SELECT stage,status,count(*) count FROM pipeline_stages GROUP BY stage,status"
+        ).fetchall():
+            stages.setdefault(str(row["stage"]), {})[str(row["status"])] = int(row["count"])
+        stage_errors = [
+            {"stage": str(row["stage"]), "error": str(row["error"]), "count": int(row["count"])}
+            for row in db.execute(
+                "SELECT stage,error,count(*) count FROM pipeline_stages WHERE status='error' "
+                "GROUP BY stage,error ORDER BY count DESC LIMIT 8"
+            ).fetchall()
+        ]
+        return {
+            "asset_status": self.counts_by_status(),
+            "stages": stages,
+            "stage_errors": stage_errors,
+            "full_embeddings": int(db.execute("SELECT count(*) FROM asset_embeddings").fetchone()[0]),
+            "region_vectors": int(db.execute("SELECT count(*) FROM region_embeddings").fetchone()[0]),
+            "region_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM region_embeddings").fetchone()[0]),
+            "ocr_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM ocr_lines").fetchone()[0]),
+            "ocr_lines": int(db.execute("SELECT count(*) FROM ocr_lines").fetchone()[0]),
+            "object_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM object_detections").fetchone()[0]),
+            "objects": int(db.execute("SELECT count(*) FROM object_detections").fetchone()[0]),
+        }
+
 
 def asset_matches_metadata(asset: Asset, filters: dict[str, str]) -> bool:
     extension = filters.get("extension")

@@ -9,12 +9,12 @@ from typing import Callable
 import numpy as np
 from PIL import Image, ImageOps
 
-from .domain import Asset, SearchHit
+from .domain import Asset, SearchDebugTrace, SearchHit
 from .gpu_scheduler import GpuPriority, GpuScheduler
 from .interfaces import EmbeddingEngine, ObjectDetector, OcrEngine, VectorIndex
-from .scoring import merge_hits
+from .scoring import effective_weights, merge_hits
 from .storage import SQLiteAssetRepository, asset_matches_metadata
-from .text import metadata_filters
+from .text import classify_query, metadata_filters
 from .vlm import VlmReranker
 
 LOGGER = logging.getLogger(__name__)
@@ -329,6 +329,27 @@ class SearchService:
         self.reranker = reranker
         self.region_vectors = region_vectors
         self.last_rerank_source = "deterministic"
+        self._debug_enabled = False
+        self._debug_lock = threading.Lock()
+        self._debug_traces: dict[int, SearchDebugTrace] = {}
+
+    def set_debug_enabled(self, enabled: bool) -> None:
+        self._debug_enabled = bool(enabled)
+        if not enabled:
+            with self._debug_lock:
+                self._debug_traces.clear()
+
+    def debug_trace(self, generation: int) -> SearchDebugTrace | None:
+        with self._debug_lock:
+            return self._debug_traces.get(int(generation))
+
+    def _store_debug_trace(self, trace: SearchDebugTrace) -> None:
+        if not self._debug_enabled:
+            return
+        with self._debug_lock:
+            self._debug_traces[trace.generation] = trace
+            for old_generation in sorted(self._debug_traces)[:-8]:
+                self._debug_traces.pop(old_generation, None)
 
     def search(self, query: str, limit: int = 10, progress=None,
                generation: int | None = None) -> list[SearchHit]:
@@ -350,12 +371,14 @@ class SearchService:
                 lambda: self.embeddings.text(query), GpuPriority.QUERY_EMBEDDING,
                 generation=generation,
             )
-        for rank, (key, score) in enumerate(self.vectors.search(query_vector, max(deterministic_limit, 200)), 1):
+        semantic_matches = self.vectors.search(query_vector, max(deterministic_limit, 200))
+        for rank, (key, score) in enumerate(semantic_matches, 1):
             asset = self.repository.get(key)
             if (asset and asset.status in ("ready", "partial")
                     and (not filters or asset_matches_metadata(asset, filters))):
                 semantic.append(SearchHit(asset, score, semantic_score=score, semantic_rank=rank))
         regions: list[SearchHit] = []
+        region_matches: list[tuple[int, float]] = []
         if self.region_vectors is not None:
             best: dict[int, tuple[float, Asset, list[int]]] = {}
             region_matches = self.region_vectors.search(query_vector, max(500, deterministic_limit))
@@ -375,20 +398,73 @@ class SearchService:
                     asset, score, region_rank=rank, region_score=score, matched_region=box,
                     reasons=["局部語意命中"],
                 ))
-        textual = self.repository.text_search(query, max(deterministic_limit, 200))
+        textual_raw = self.repository.text_search(query, max(deterministic_limit, 200))
+        textual = textual_raw
         if filters:
             textual = [hit for hit in textual if asset_matches_metadata(hit.asset, filters)]
         metadata = self.repository.metadata_search(query, max(deterministic_limit, 200))
-        objects = self.repository.object_search(query, max(deterministic_limit, 200))
+        objects_raw = self.repository.object_search(query, max(deterministic_limit, 200))
+        objects = objects_raw
         if filters:
             objects = [hit for hit in objects if asset_matches_metadata(hit.asset, filters)]
         results = merge_hits(
             query, semantic, textual,
             deterministic_limit, objects=objects, metadata=metadata, regions=regions,
         )
+        reranker_requested = bool(self.reranker and self.reranker.should_run(query, results))
+        trace = None
+        if self._debug_enabled:
+            query_type = classify_query(query)
+            available = {
+                name for name, values in (
+                    ("semantic", semantic), ("region", regions), ("text", textual),
+                    ("object", objects), ("metadata", metadata),
+                ) if values
+            }
+            trace = SearchDebugTrace(
+                generation=generation,
+                query=query,
+                query_type=query_type,
+                filters=filters,
+                candidate_counts={
+                    "semantic_raw": len(semantic_matches),
+                    "semantic": len(semantic),
+                    "region_vectors_raw": len(region_matches),
+                    "region": len(regions),
+                    "text_raw": len(textual_raw),
+                    "text": len(textual),
+                    "object_raw": len(objects_raw),
+                    "object": len(objects),
+                    "metadata": len(metadata),
+                    "union": len(results),
+                },
+                effective_weights=effective_weights(query_type, available),
+                index_coverage=self.repository.index_coverage(),
+                deterministic_candidates=list(results),
+                reranker_requested=reranker_requested,
+            )
+            self._store_debug_trace(trace)
         if self.reranker is not None:
             final = self.reranker.rerank(query, results, generation, progress)
-            self.last_rerank_source = final[0].rerank_source if final else "qwen3.5"
+            self.last_rerank_source = (
+                final[0].rerank_source if final else
+                ("qwen3.5" if reranker_requested else "deterministic")
+            )
+            if trace is not None:
+                trace.final_results = list(final[:limit])
+                trace.reranker_source = self.last_rerank_source
+                trace.candidate_counts["vlm_input"] = (
+                    min(self.reranker.candidate_count, len(results)) if trace.reranker_requested else 0
+                )
+                trace.candidate_counts["vlm_evaluated"] = sum(
+                    hit.vlm_score is not None for hit in results[:self.reranker.candidate_count]
+                )
+                trace.candidate_counts["final"] = len(final[:limit])
+                self._store_debug_trace(trace)
             return final[:limit]
         self.last_rerank_source = "deterministic"
+        if trace is not None:
+            trace.final_results = list(results[:limit])
+            trace.reranker_source = self.last_rerank_source
+            self._store_debug_trace(trace)
         return results[:limit]

@@ -17,6 +17,14 @@ def rank_score(rank: int) -> float:
     return (RRF_K + 1) / (RRF_K + rank)
 
 
+def effective_weights(query_type: str, available: set[str]) -> dict[str, float]:
+    """Redistribute configured weights only across channels that returned candidates."""
+    configured = WEIGHTS.get(query_type, WEIGHTS["visual"])
+    active = {name for name in available if name in configured}
+    denominator = sum(configured[name] for name in active) or 1.0
+    return {name: configured[name] / denominator for name in active}
+
+
 def merge_hits(
     query: str,
     semantic: list[SearchHit],
@@ -80,9 +88,7 @@ def merge_hits(
         "object" if objects else None,
         "metadata" if metadata else None,
     } - {None}
-    configured = WEIGHTS[query_type]
-    denominator = sum(configured[name] for name in available) or 1.0
-    weights = {name: configured[name] / denominator for name in available}
+    weights = effective_weights(query_type, available)
     for hit in merged.values():
         hit.query_type = query_type
         channels: dict[str, float] = {}

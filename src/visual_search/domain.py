@@ -92,5 +92,23 @@ class SearchHit:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class SearchDebugTrace:
+    """One developer-only snapshot of the complete retrieval and rerank path."""
+
+    generation: int
+    query: str
+    query_type: str
+    filters: dict[str, str] = field(default_factory=dict)
+    candidate_counts: dict[str, int] = field(default_factory=dict)
+    effective_weights: dict[str, float] = field(default_factory=dict)
+    index_coverage: dict[str, Any] = field(default_factory=dict)
+    deterministic_candidates: list[SearchHit] = field(default_factory=list)
+    final_results: list[SearchHit] = field(default_factory=list)
+    reranker_requested: bool = False
+    reranker_source: str = "deterministic"
+    formula: str = "deterministic = min(1, 0.75 x weighted_RRF + bonus)"
+
+
 Vector = np.ndarray
 AssetSequence = Sequence[Asset]

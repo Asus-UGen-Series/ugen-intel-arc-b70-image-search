@@ -110,7 +110,38 @@ python3 scripts/convert-yoloe26-openvino-wsl.py --scale both --install-local
 
 輸出位於 `artifacts/hf/yoloe-26s-pf-openvino-fp16` 與 `artifacts/hf/yoloe-26m-pf-openvino-fp16`。ONNX 只作轉換結果比對，預設驗證後刪除，不會進入 runtime 或安裝包。上傳後分別以 `--section yoloe_s`、`--section yoloe_m` 固定 Hugging Face revision。
 
-開發機可用根目錄的 `quick-test.cmd` 執行測試、診斷與 UI；此檔案及 `tests/` 依產品需求只留本機，不提交 Git。
+### 開發者搜尋除錯
+
+維護者的本機 checkout 可用根目錄 `quick-test.cmd` 啟動開發者模式：
+
+```cmd
+quick-test.cmd app
+```
+
+這個入口會設定 `VISUAL_SEARCH_DEVELOPER_MODE=1`，並顯示正式版沒有的「搜尋除錯（開發者）」頁。頁面會保存最近一次查詢的本機 trace，包含：
+
+- 查詢類型與實際套用的 SigLIP 全圖、SigLIP 局部、OCR／檔名、YOLOE、Metadata 權重。
+- 各通道套用 hard filter 前後的候選數、每張圖的原始相似度、名次、RRF 分數與加權貢獻。
+- exact filename／OCR phrase／identifier bonus、deterministic 分數、VLM 分數、`hard_fail` 與最後分數。
+- ready／partial／error 數量，以及 embedding、region、OCR、object 各索引階段的覆蓋率。
+- 指定一個預期檔名後，判斷它是未進召回 Top 60，還是進入候選後被排名／VLM 移除。
+
+評分公式為：
+
+```text
+RRF(rank) = 61 / (60 + rank)
+deterministic = min(1, 0.75 * sum(channel_weight * RRF) + bonus)
+final = 0.70 * VLM + 0.30 * deterministic   # 只有啟用 VLM 時
+```
+
+若本機沒有 `quick-test.cmd`，也可以在 CMD 暫時啟用：
+
+```cmd
+set VISUAL_SEARCH_DEVELOPER_MODE=1
+scripts\run-dev.cmd
+```
+
+正式 `VisualSearch-Setup.exe` 為 frozen build，即使設定環境變數也不會顯示或保存 developer trace。`quick-test.cmd` 與 `tests/` 依產品需求只留維護者本機，不提交 Git。
 
 ## 建置 Windows 安裝程式
 

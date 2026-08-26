@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import sys
 import subprocess
 import shutil
 import tempfile
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from .config import AppConfig
 from .engines import ColorFallbackEmbedding, NoopOcrEngine, detect_openvino_devices
+from .domain import SearchDebugTrace
 from .indexer import IndexController, SearchService
 from .models import OCR_MODEL_ID, ModelManager, ModelRegistry
 from .paths import AppPaths
@@ -535,6 +537,270 @@ class OcrDiagnosticPage(QWidget):
         target = self.preview.size() if self.preview.width() > 100 else QSize(900, 520)
         self.preview.setPixmap(pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
+
+class DeveloperSearchPage(QWidget):
+    """Search recall/ranking trace. It is never exposed by a frozen production build."""
+
+    CHANNEL_LABELS = {
+        "semantic": "SigLIP 全圖",
+        "region": "SigLIP 局部",
+        "text": "OCR／檔名",
+        "object": "YOLOE 物件",
+        "metadata": "Metadata",
+    }
+
+    def __init__(self, repository):
+        super().__init__()
+        self.repository = repository
+        self.trace: SearchDebugTrace | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("搜尋召回與評分除錯")
+        title.setObjectName("sectionTitle")
+        warning = QLabel(
+            "開發者模式：只會由 quick-test.cmd app 啟用。正式安裝版不顯示此頁，也不保存搜尋 trace。"
+        )
+        warning.setObjectName("capabilityWarning")
+        warning.setWordWrap(True)
+        architecture = QLabel(
+            "召回層｜SigLIP 全圖找整體畫面；SigLIP 局部找小物件；OCR／檔名找精確文字；"
+            "YOLOE 提供固定開放詞彙的軟候選；Metadata 處理日期、格式與資料夾。\n"
+            "融合層｜各通道先各取候選，再以加權 RRF 合併；完整檔名、OCR 片語與程式碼識別字另加 bonus。\n"
+            "審核層｜visual／mixed 查詢可把 deterministic Top 30 交給 Qwen3.5；最後為 70% VLM + 30% deterministic。"
+        )
+        architecture.setWordWrap(True)
+        architecture.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(title)
+        layout.addWidget(warning)
+        layout.addWidget(architecture)
+
+        self.query_summary = QLabel("完成一次搜尋後，這裡會顯示該次完整 trace。")
+        self.query_summary.setWordWrap(True)
+        self.query_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.candidate_summary = QLabel()
+        self.candidate_summary.setWordWrap(True)
+        self.candidate_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.coverage_summary = QLabel()
+        self.coverage_summary.setWordWrap(True)
+        self.coverage_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.diagnosis = QLabel()
+        self.diagnosis.setObjectName("capabilityWarning")
+        self.diagnosis.setWordWrap(True)
+        for widget in (self.query_summary, self.candidate_summary, self.coverage_summary, self.diagnosis):
+            layout.addWidget(widget)
+
+        expected_row = QHBoxLayout()
+        self.expected = QLineEdit()
+        self.expected.setPlaceholderText("可選：輸入預期應找到的檔名或完整路徑，檢查它在哪一層消失")
+        inspect_button = QPushButton("檢查指定圖片")
+        inspect_button.clicked.connect(self.inspect_expected)
+        expected_row.addWidget(self.expected, 1)
+        expected_row.addWidget(inspect_button)
+        layout.addLayout(expected_row)
+        self.expected_result = QLabel()
+        self.expected_result.setWordWrap(True)
+        self.expected_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.expected_result)
+
+        self.table = QTableWidget(0, 13)
+        self.table.setHorizontalHeaderLabels([
+            "Det.#", "檔名", "去向", "最後分數", "Det.分數", "VLM", "Bonus",
+            "SigLIP 全圖", "SigLIP 局部", "OCR／檔名", "YOLOE", "Metadata", "命中原因",
+        ])
+        header = self.table.horizontalHeader()
+        for column in (0, 2, 3, 4, 5, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for column in range(7, 12):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(12, QHeaderView.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setDefaultSectionSize(64)
+        layout.addWidget(self.table, 1)
+
+    @staticmethod
+    def _mapping_text(values: dict[str, object]) -> str:
+        return "、".join(f"{key}={value}" for key, value in sorted(values.items())) or "無"
+
+    @staticmethod
+    def _short_error(value: str) -> str:
+        lines = [line.strip() for line in str(value).splitlines() if line.strip()]
+        preferred = next(
+            (line for line in lines if "CL_" in line or "not JSON serializable" in line or "out of memory" in line.casefold()),
+            lines[-1] if lines else "未知錯誤",
+        )
+        return preferred[:220]
+
+    def _channel_text(self, hit, channel: str) -> str:
+        rank = getattr(hit, f"{channel}_rank")
+        if rank is None:
+            return "—"
+        rrf = float(hit.channel_scores.get(channel, 0.0))
+        weight = float(self.trace.effective_weights.get(channel, 0.0)) if self.trace else 0.0
+        raw = ""
+        if channel == "semantic":
+            raw = f"sim {hit.semantic_score:.4f}\n"
+        elif channel == "region":
+            raw = f"sim {hit.region_score:.4f}\n"
+        elif channel == "text":
+            raw = f"text {hit.text_score:.4f}\n"
+        elif channel == "object" and hit.metadata.get("object_confidence") is not None:
+            raw = f"conf {float(hit.metadata['object_confidence']):.3f}\n"
+        return f"#{rank}\n{raw}RRF {rrf:.4f}\n× {weight:.0%} = {rrf * weight:.4f}"
+
+    def show_trace(self, trace: SearchDebugTrace | None) -> None:
+        self.trace = trace
+        self.expected_result.clear()
+        if trace is None:
+            self.query_summary.setText("本次沒有 trace；請確認是從 quick-test.cmd app 啟動。")
+            self.table.setRowCount(0)
+            return
+        type_name = {
+            "identifier": "identifier（型號／程式碼）",
+            "visual": "visual（畫面描述）",
+            "mixed": "mixed（混合）",
+            "metadata": "metadata（日期／檔案條件）",
+        }.get(trace.query_type, trace.query_type)
+        weights = "、".join(
+            f"{self.CHANNEL_LABELS.get(name, name)} {weight:.0%}"
+            for name, weight in sorted(trace.effective_weights.items())
+        ) or "沒有可用通道"
+        self.query_summary.setText(
+            f"查詢：{trace.query}\n類型：{type_name} · generation {trace.generation} · "
+            f"hard filters：{self._mapping_text(trace.filters)}\n"
+            f"實際權重：{weights}\n"
+            f"公式：{trace.formula}；VLM 啟用時 final = 0.70 × VLM + 0.30 × deterministic"
+        )
+        counts = trace.candidate_counts
+        self.candidate_summary.setText(
+            "候選數｜"
+            f"全圖 {counts.get('semantic_raw', 0)} → {counts.get('semantic', 0)}；"
+            f"局部向量 {counts.get('region_vectors_raw', 0)} → 圖片 {counts.get('region', 0)}；"
+            f"文字 {counts.get('text_raw', 0)} → {counts.get('text', 0)}；"
+            f"物件 {counts.get('object_raw', 0)} → {counts.get('object', 0)}；"
+            f"Metadata {counts.get('metadata', 0)}；聯集 Top {counts.get('union', 0)}；"
+            f"VLM {counts.get('vlm_evaluated', 0)}/{counts.get('vlm_input', 0)}；"
+            f"最終 {counts.get('final', len(trace.final_results))}。審核來源：{trace.reranker_source}"
+        )
+        coverage = trace.index_coverage
+        status = coverage.get("asset_status", {})
+        stages = coverage.get("stages", {})
+        stage_text = "；".join(
+            f"{stage}({self._mapping_text(states)})" for stage, states in sorted(stages.items())
+        ) or "尚無階段資料"
+        self.coverage_summary.setText(
+            f"索引覆蓋｜圖片狀態：{self._mapping_text(status)}；全圖向量 {coverage.get('full_embeddings', 0)}；"
+            f"局部向量 {coverage.get('region_vectors', 0)}／{coverage.get('region_assets', 0)} 張；"
+            f"OCR {coverage.get('ocr_lines', 0)} 行／{coverage.get('ocr_assets', 0)} 張；"
+            f"物件 {coverage.get('objects', 0)} 個／{coverage.get('object_assets', 0)} 張。\n階段：{stage_text}"
+        )
+        stage_errors = coverage.get("stage_errors", [])
+        if stage_errors:
+            error_text = "；".join(
+                f"{item.get('stage', '?')} × {item.get('count', 0)}：{self._short_error(str(item.get('error', '')))}"
+                for item in stage_errors[:5]
+            )
+            self.coverage_summary.setText(self.coverage_summary.text() + "\n主要錯誤：" + error_text)
+        notes: list[str] = []
+        if int(status.get("partial", 0)) or int(status.get("error", 0)):
+            notes.append("索引尚未全數 ready；漏圖可能是對應階段仍 pending／error。")
+        if not counts.get("semantic"):
+            notes.append("SigLIP 全圖沒有候選：檢查 embedding 階段與全圖 USearch。")
+        if not counts.get("region"):
+            notes.append("SigLIP 局部沒有候選：小圖可能不建局部向量；大量高解析圖皆為 0 則 region_embedding 尚未完成。")
+        if not counts.get("text"):
+            notes.append("OCR／檔名沒有候選：精確文字可能未被 OCR 收錄，請搭配 OCR 診斷頁檢查。")
+        if trace.filters and any(counts.get(name + "_raw", 0) > counts.get(name, 0) for name in ("semantic", "text", "object")):
+            notes.append("hard filter 已移除部分候選；請確認日期、格式或資料夾解析是否符合原意。")
+        if trace.reranker_requested and trace.reranker_source == "deterministic-fallback":
+            notes.append("VLM 失敗並整次回退，這不是召回漏圖。")
+        self.diagnosis.setText("初步判讀：" + (" ".join(notes) if notes else "各通道均有候選；請用下方排名或指定圖片檢查定位。"))
+
+        final_order = {
+            hit.asset.id: rank for rank, hit in enumerate(trace.final_results, 1) if hit.asset.id is not None
+        }
+        self.table.setRowCount(len(trace.deterministic_candidates))
+        vlm_input = int(counts.get("vlm_input", 0))
+        for row, hit in enumerate(trace.deterministic_candidates):
+            asset_id = hit.asset.id
+            if asset_id in final_order:
+                destination = f"最終 #{final_order[asset_id]}"
+            elif hit.vlm_hard_fail:
+                destination = "VLM hard_fail 移除"
+            elif trace.reranker_requested and row < vlm_input and hit.vlm_score is not None:
+                destination = "VLM 後掉出 Top 10"
+            elif trace.reranker_requested and row < vlm_input:
+                destination = "VLM 未完成／回退"
+            else:
+                destination = "Det. 候選，未進最終"
+            values = [
+                str(row + 1), Path(hit.asset.path).name, destination, f"{hit.score:.4f}",
+                f"{hit.deterministic_score:.4f}",
+                "—" if hit.vlm_score is None else f"{hit.vlm_score:.2f}", f"{hit.bonus_score:.3f}",
+                self._channel_text(hit, "semantic"), self._channel_text(hit, "region"),
+                self._channel_text(hit, "text"), self._channel_text(hit, "object"),
+                self._channel_text(hit, "metadata"), "\n".join(hit.reasons),
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(hit.asset.path if column == 1 else value)
+                if hit.vlm_hard_fail:
+                    cell.setForeground(QColor("#b42318"))
+                self.table.setItem(row, column, cell)
+        self.table.resizeRowsToContents()
+
+    def inspect_expected(self) -> None:
+        needle = self.expected.text().strip().casefold()
+        if not needle:
+            self.expected_result.setText("請輸入檔名的一部分或完整路徑。")
+            return
+        matches = [asset for asset in self.repository.all_assets() if needle in asset.path.casefold()]
+        if not matches:
+            self.expected_result.setText("資料庫中找不到這個檔名／路徑：它尚未被掃描、已被清除，或輸入內容不符。")
+            return
+        trace = self.trace
+        det_order = {
+            hit.asset.id: rank for rank, hit in enumerate(trace.deterministic_candidates, 1)
+            if hit.asset.id is not None
+        } if trace else {}
+        final_order = {
+            hit.asset.id: rank for rank, hit in enumerate(trace.final_results, 1)
+            if hit.asset.id is not None
+        } if trace else {}
+        details = []
+        for asset in matches[:6]:
+            asset_id = int(asset.id)
+            stages = self.repository.stage_states(asset_id)
+            stage_text = "、".join(f"{name}:{state.get('status', '?')}" for name, state in sorted(stages.items())) or "無"
+            stage_error_text = "；".join(
+                f"{name}：{self._short_error(state.get('error', ''))}"
+                for name, state in sorted(stages.items()) if state.get("error")
+            )
+            ocr_lines = self.repository.ocr_lines(asset_id)
+            objects = self.repository.object_detections(asset_id)
+            if asset_id in final_order:
+                location = f"已進最終 #{final_order[asset_id]}（deterministic #{det_order.get(asset_id, '?')}）"
+            elif asset_id in det_order:
+                hit = trace.deterministic_candidates[det_order[asset_id] - 1]
+                location = (
+                    f"有進 deterministic #{det_order[asset_id]}，但未進最終"
+                    + ("；VLM hard_fail" if hit.vlm_hard_fail else "；屬於排名／VLM 問題")
+                )
+            else:
+                location = "未進 deterministic Top 60；屬於召回、索引覆蓋或 hard filter 問題"
+            details.append(
+                f"{asset.path}\n狀態 {asset.status}；{location}\n"
+                f"階段 {stage_text}；OCR {len(ocr_lines)} 行（可搜尋 {sum(line.searchable for line in ocr_lines)}）；"
+                f"局部向量 {len(self.repository.region_ids(asset_id))}；物件 {len(objects)}"
+                + (f"\n階段錯誤：{stage_error_text}" if stage_error_text else "")
+                + (f"；錯誤 {asset.error}" if asset.error else "")
+            )
+        suffix = f"\n另有 {len(matches) - 6} 張名稱相符，請輸入更完整路徑。" if len(matches) > 6 else ""
+        self.expected_result.setText("\n\n".join(details) + suffix)
+
 class MainPage(QWidget):
     def __init__(self, paths: AppPaths, config: AppConfig, controller: IndexController,
                  search: SearchService, model_manager: ModelManager, registry: ModelRegistry):
@@ -542,6 +808,14 @@ class MainPage(QWidget):
         self.paths, self.config, self.controller, self.search_service = paths, config, controller, search
         self.model_manager = model_manager
         self.registry = registry
+        self.developer_mode = (
+            os.environ.get("VISUAL_SEARCH_DEVELOPER_MODE", "").strip().casefold() in {"1", "true", "yes", "on"}
+            and not getattr(sys, "frozen", False)
+        )
+        self.developer_diagnostics = None
+        self.developer_tab_index = -1
+        if self.developer_mode:
+            self.search_service.set_debug_enabled(True)
         self.search_generation = 0
         self.pool = QThreadPool.globalInstance()
         self._rescan_queue: list[str] = []
@@ -609,6 +883,9 @@ class MainPage(QWidget):
         self.models_scroll.setWidgetResizable(True)
         self.models_scroll.setWidget(self.models_page)
         self.tabs.addTab(self.models_scroll, "模型與效能")
+        if self.developer_mode:
+            self.developer_diagnostics = DeveloperSearchPage(self.controller.repository)
+            self.developer_tab_index = self.tabs.addTab(self.developer_diagnostics, "搜尋除錯（開發者）")
         self.refresh_model_status()
         layout.addWidget(self.tabs)
 
@@ -693,6 +970,9 @@ class MainPage(QWidget):
             self.search_status.setText("VLM 未能完成，本次已安全改用混合搜尋結果。")
         else:
             self.search_status.setText("本次為精確／條件查詢，已使用可解釋的混合搜尋結果。")
+        if self.developer_diagnostics is not None:
+            self.developer_diagnostics.show_trace(self.search_service.debug_trace(generation))
+            self.tabs.setTabText(self.developer_tab_index, "搜尋除錯（有新資料）")
 
     @Slot(int, str)
     def on_search_failed(self, generation: int, error: str):
@@ -701,6 +981,8 @@ class MainPage(QWidget):
         self._clear_layout(self.results_layout)
         self.results_layout.addWidget(QLabel(f"搜尋失敗：{error}"), 0, 0, 1, 4)
         self.search_status.setText("搜尋發生錯誤，請到模型與效能頁查看狀態。")
+        if self.developer_diagnostics is not None:
+            self.developer_diagnostics.query_summary.setText(f"搜尋在建立完整 trace 前失敗：{error}")
 
     @staticmethod
     def _package_version(name: str) -> str:
