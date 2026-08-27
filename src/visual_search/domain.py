@@ -25,6 +25,12 @@ class ObjectDetection:
     box: list[float] = field(default_factory=list)
     label_zh: str = ""
 
+    def __post_init__(self) -> None:
+        self.label = str(self.label)
+        self.label_zh = str(self.label_zh)
+        self.confidence = float(self.confidence)
+        self.box = [float(value) for value in self.box]
+
 
 @dataclass(slots=True)
 class RegionEmbedding:

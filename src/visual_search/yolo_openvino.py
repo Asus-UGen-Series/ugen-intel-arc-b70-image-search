@@ -73,7 +73,7 @@ class OpenVinoYoloEngine(ObjectDetector):
     def __init__(self, model_dir: Path, device: str = "GPU", confidence: float = 0.20,
                  iou_threshold: float = 0.70, max_detections: int = 50):
         import openvino as ov
-        from .engines import compiled_execution_devices, select_openvino_device
+        from .engines import compiled_execution_devices, safe_compiled_property, select_openvino_device, serial_inference_config
 
         self.model_dir = Path(model_dir)
         model_path = next(iter(sorted(self.model_dir.glob("*.xml"))), None)
@@ -89,7 +89,11 @@ class OpenVinoYoloEngine(ObjectDetector):
         cache = self.model_dir / "compiled_cache"
         cache.mkdir(exist_ok=True)
         core.set_property({"CACHE_DIR": str(cache)})
-        self.compiled = core.compile_model(model_path, self.device, {"PERFORMANCE_HINT": "THROUGHPUT"})
+        self.compiled = core.compile_model(model_path, self.device, serial_inference_config(self.device))
+        self.request = self.compiled.create_infer_request()
+        self.optimal_infer_requests = safe_compiled_property(
+            self.compiled, "OPTIMAL_NUMBER_OF_INFER_REQUESTS"
+        )
         self.execution_devices = compiled_execution_devices(self.compiled, self.device)
         shape = self.compiled.input(0).shape
         self.input_height, self.input_width = int(shape[-2]), int(shape[-1])
@@ -103,8 +107,11 @@ class OpenVinoYoloEngine(ObjectDetector):
         if source is None:
             raise ValueError(f"Unable to decode image: {image}")
         tensor, scale, pad_x, pad_y = letterbox(source, self.input_width, self.input_height)
-        inference = self.compiled([tensor])
-        outputs = [np.asarray(inference[port]) for port in self.compiled.outputs]
+        self.request.infer({self.compiled.input(0): tensor})
+        outputs = [
+            np.array(self.request.get_output_tensor(index).data, copy=True)
+            for index, _port in enumerate(self.compiled.outputs)
+        ]
         boxes, scores, classes = parse_yoloe_outputs(outputs, self.confidence, len(self.labels))
         if not len(boxes):
             return []
@@ -132,15 +139,19 @@ class OpenVinoYoloEngine(ObjectDetector):
             class_id = int(classes[index])
             label = self.labels[class_id] if 0 <= class_id < len(self.labels) else f"class-{class_id}"
             result.append(ObjectDetection(
-                label, float(scores[index]), [x1, y1, x2, y2], ZH_LABELS.get(label.casefold(), "")
+                label, float(scores[index]), [float(x1), float(y1), float(x2), float(y2)],
+                ZH_LABELS.get(label.casefold(), "")
             ))
         return result
 
     def smoke_test(self) -> None:
         shape = self.compiled.input(0).shape
         tensor = np.zeros(tuple(int(item) for item in shape), dtype=np.float32)
-        result = self.compiled([tensor])
-        if not all(np.isfinite(np.asarray(result[port])).all() for port in self.compiled.outputs):
+        self.request.infer({self.compiled.input(0): tensor})
+        if not all(
+            np.isfinite(np.asarray(self.request.get_output_tensor(index).data)).all()
+            for index, _port in enumerate(self.compiled.outputs)
+        ):
             raise RuntimeError("YOLOE-26 OpenVINO smoke test failed")
 
     def runtime_details(self) -> list[dict[str, object]]:
@@ -148,6 +159,8 @@ class OpenVinoYoloEngine(ObjectDetector):
             "name": f"YOLOE-26{self.scale} 開放物件辨識",
             "backend": "OpenVINO FP16", "requested_device": self.device,
             "execution_devices": self.execution_devices, "selected_device": self.device, "loaded": True,
+            "performance_hint": "LATENCY",
+            "optimal_infer_requests": self.optimal_infer_requests,
             "prompt_mode": "prompt-free", "vocabulary_size": len(self.labels), "scale": self.scale,
         }]
 

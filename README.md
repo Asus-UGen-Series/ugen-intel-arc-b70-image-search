@@ -51,9 +51,15 @@ python -m venv .venv
 .\.venv\Scripts\python.exe launcher.py --diagnose
 .\.venv\Scripts\python.exe launcher.py --export-logs
 .\.venv\Scripts\python.exe launcher.py --reset-index
+.\.venv\Scripts\python.exe launcher.py --resume-index
 ```
 
 診斷輸出包含 OpenVINO runtime、實際執行裝置、SigLIP、OCR、YOLOE、VLM 的載入狀態、區域向量數、模型來源與 GPU 排程狀態。
+`--resume-index` 只接續 pending、error、版本過期的階段，不會清除已完成的 OCR 或 embedding。開發機也可執行 `quick-test.cmd repair`。
+
+索引模型以 `LATENCY`、單一 stream 編譯，因所有 GPU 工作已由應用程式排程器序列化；這可避免 `THROUGHPUT` 為多模型配置不會被使用的平行 stream 與額外中間記憶體。若 Intel GPU 回報 `CL_OUT_OF_RESOURCES` 或 driver event failure，排程器會熔斷並安全暫停索引，保留其餘圖片為待續跑狀態，重新啟動後即可接續。
+
+程式啟動後會自動掃描已設定資料夾並接續未完成階段。OCR recognition 使用固定寬度 bucket 與固定 padding shape，越寬的文字行會自動降低 batch，避免長時間索引時因動態 shape 與過大 activation 耗盡 GPU 記憶體。1024×1024 圖片會建立 2×2 的四個局部向量；真正的小圖則將 `region_embedding` 清楚標成 `skipped`，不再以零向量的 `ready` 狀態混淆診斷。
 
 ## Qwen3.5 OpenVINO 轉換（WSL）
 

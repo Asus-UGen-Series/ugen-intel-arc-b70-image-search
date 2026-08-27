@@ -242,11 +242,43 @@ def export_logs(paths: AppPaths, destination: Path | None) -> int:
     return 0
 
 
+def resume_index(paths: AppPaths) -> int:
+    """Resume only incomplete/stale stages for every configured image root."""
+    config = AppConfig.load(paths.config)
+    roots = [Path(root) for root in config.roots if Path(root).is_dir()]
+    if not roots:
+        cli_output("找不到已設定且仍存在的圖片資料夾。")
+        return 2
+    registry = create_model_registry(paths)
+    repository, controller, _search = create_services(paths, config, registry)
+    last_reported = {"value": -1}
+
+    def report(current: int, total: int, name: str) -> None:
+        bucket = current // 25
+        if bucket != last_reported["value"] or current >= total or controller.last_stop_reason:
+            cli_output(f"[{current}/{total}] {name}")
+            last_reported["value"] = bucket
+
+    try:
+        for root in roots:
+            cli_output(f"接續索引：{root}")
+            controller.scan(root, report)
+            if controller.last_stop_reason:
+                cli_output(controller.last_stop_reason)
+                return 3
+        cli_output(json.dumps(repository.index_coverage(), ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        if controller.scheduler is not None:
+            controller.scheduler.shutdown()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--diagnose", action="store_true")
     parser.add_argument("--reset-index", action="store_true")
     parser.add_argument("--export-logs", nargs="?", const="", metavar="ZIP")
+    parser.add_argument("--resume-index", action="store_true")
     args = parser.parse_args(argv)
     paths = AppPaths.default()
     configure_logging(paths)
@@ -256,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
         return reset(paths)
     if args.export_logs is not None:
         return export_logs(paths, Path(args.export_logs) if args.export_logs else None)
+    if args.resume_index:
+        return resume_index(paths)
     from PySide6.QtWidgets import QApplication
     from .ui import MainWindow, ModelSetupDialog, VlmChoiceDialog
     app = QApplication(sys.argv)

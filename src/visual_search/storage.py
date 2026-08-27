@@ -346,7 +346,8 @@ class SQLiteAssetRepository(AssetRepository):
         db.executemany(
             "INSERT INTO object_detections(asset_id,label,label_zh,confidence,box_json) VALUES(?,?,?,?,?)",
             [
-                (asset_id, item.label, item.label_zh, float(item.confidence), json.dumps(item.box))
+                (asset_id, item.label, item.label_zh, float(item.confidence),
+                 json.dumps([float(value) for value in item.box]))
                 for item in detections
             ],
         )
@@ -405,6 +406,14 @@ class SQLiteAssetRepository(AssetRepository):
         ).fetchone()
         return row is not None
 
+    def stage_complete(self, asset_id: int, stage: str, model_version: str, input_sha256: str) -> bool:
+        row = self._connection().execute(
+            "SELECT 1 FROM pipeline_stages WHERE asset_id=? AND stage=? AND status IN ('ready','skipped') "
+            "AND model_version=? AND input_sha256=?",
+            (asset_id, stage, model_version, input_sha256),
+        ).fetchone()
+        return row is not None
+
     def stage_states(self, asset_id: int) -> dict[str, dict[str, str]]:
         rows = self._connection().execute(
             "SELECT stage,status,model_version,input_sha256,error,updated_at FROM pipeline_stages WHERE asset_id=?",
@@ -423,6 +432,60 @@ class SQLiteAssetRepository(AssetRepository):
         db = self._connection()
         db.execute("UPDATE pipeline_stages SET status='pending',error='Interrupted; queued to resume',updated_at=CURRENT_TIMESTAMP WHERE status='running'")
         db.commit()
+
+    def queue_stale_stage(self, stage: str, model_version: str) -> int:
+        """Mark old stage versions pending so diagnostics and resume state stay truthful."""
+        db = self._connection()
+        rows = db.execute(
+            "SELECT asset_id FROM pipeline_stages WHERE stage=? AND model_version<>?",
+            (stage, model_version),
+        ).fetchall()
+        asset_ids = [int(row[0]) for row in rows]
+        if not asset_ids:
+            return 0
+        db.execute(
+            "UPDATE pipeline_stages SET status='pending',error='Stage version changed; queued to resume',"
+            "updated_at=CURRENT_TIMESTAMP WHERE stage=? AND model_version<>?",
+            (stage, model_version),
+        )
+        marks = ",".join("?" for _ in asset_ids)
+        db.execute(
+            f"UPDATE assets SET status='partial' WHERE id IN ({marks}) AND status='ready'",
+            asset_ids,
+        )
+        db.commit()
+        return len(asset_ids)
+
+    def queue_resolved_failures(self) -> int:
+        """Retry failures addressed by the runtime memory/serialization fixes."""
+        db = self._connection()
+        markers = (
+            "%CL_OUT_OF_RESOURCES%",
+            "%CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST%",
+            "%could not create a memory%",
+            "%not JSON serializable%",
+        )
+        where = " OR ".join("error LIKE ?" for _marker in markers)
+        rows = db.execute(
+            f"SELECT asset_id FROM pipeline_stages WHERE status='error' AND ({where})",
+            markers,
+        ).fetchall()
+        asset_ids = list(dict.fromkeys(int(row[0]) for row in rows))
+        if not rows:
+            return 0
+        db.execute(
+            f"UPDATE pipeline_stages SET status='pending',error='Resolved runtime failure; queued to resume',"
+            f"updated_at=CURRENT_TIMESTAMP WHERE status='error' AND ({where})",
+            markers,
+        )
+        if asset_ids:
+            marks = ",".join("?" for _ in asset_ids)
+            db.execute(
+                f"UPDATE assets SET status='partial' WHERE id IN ({marks})",
+                asset_ids,
+            )
+        db.commit()
+        return len(rows)
 
     def save_embedding(self, asset_id: int, vector: np.ndarray, model_version: str) -> None:
         value = np.asarray(vector, dtype=np.float16).reshape(-1)

@@ -42,7 +42,7 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
         import openvino as ov
         import yaml
 
-        from .engines import select_openvino_device
+        from .engines import select_openvino_device, serial_inference_config
 
         self.model_dir = Path(model_dir)
         self.minimum_confidence = minimum_confidence
@@ -54,9 +54,11 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
         cache = self.model_dir / "compiled_cache"
         cache.mkdir(exist_ok=True)
         core.set_property({"CACHE_DIR": str(cache)})
-        config = {"PERFORMANCE_HINT": "THROUGHPUT"}
+        config = serial_inference_config(self.device)
         self.det_model = core.compile_model(self.model_dir / "det_model.xml", self.device, config)
         self.rec_model = core.compile_model(self.model_dir / "rec_model.xml", self.device, config)
+        self.det_request = self.det_model.create_infer_request()
+        self.rec_request = self.rec_model.create_infer_request()
         self.det_execution_devices = execution_devices(self.det_model, self.device)
         self.rec_execution_devices = execution_devices(self.rec_model, self.device)
         self.det_optimal_requests = integer_property(self.det_model, "OPTIMAL_NUMBER_OF_INFER_REQUESTS")
@@ -130,7 +132,7 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
     ) -> list[DetectedTextBox]:
         tensor, scale, original_size = preprocess_detection(source, self.DET_BUCKETS)
         self._last_detection_scale = scale
-        result = infer_first(self.det_model, tensor)
+        result = infer_first(self.det_model, tensor, self.det_request)
         probability = np.asarray(result).squeeze()
         if probability.ndim != 2:
             raise RuntimeError(f"Unexpected OCR detection output: {np.asarray(result).shape}")
@@ -155,15 +157,25 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
 
     def recognize(self, crops: list[np.ndarray]) -> list[tuple[str, float]]:
         results: list[tuple[str, float]] = [("", 0.0)] * len(crops)
-        ordered = sorted(range(len(crops)), key=lambda index: crops[index].shape[1] / max(crops[index].shape[0], 1))
-        for start in range(0, len(ordered), self.recognition_batch_size):
-            indices = ordered[start : start + self.recognition_batch_size]
-            batch_crops = [crops[index] for index in indices]
-            tensor = preprocess_recognition(batch_crops, self.REC_WIDTH_BUCKETS)
-            logits = infer_first(self.rec_model, tensor)
-            decoded = decode_ctc(np.asarray(logits), self.characters)
-            for index, value in zip(indices, decoded, strict=True):
-                results[index] = value
+        buckets: dict[int, list[int]] = {}
+        for index, crop in enumerate(crops):
+            buckets.setdefault(recognition_width(crop, self.REC_WIDTH_BUCKETS), []).append(index)
+        # Keep a fixed padded batch shape for each width bucket. This prevents
+        # the GPU plugin from retaining a new dynamic-shape allocation for every
+        # possible remainder batch while indexing thousands of images.
+        for target_width, ordered in sorted(buckets.items()):
+            batch_size = recognition_batch_capacity(target_width, self.recognition_batch_size)
+            for start in range(0, len(ordered), batch_size):
+                indices = ordered[start : start + batch_size]
+                batch_crops = [crops[index] for index in indices]
+                padded = [*batch_crops, *([batch_crops[-1]] * (batch_size - len(batch_crops)))]
+                tensor = preprocess_recognition(
+                    padded, self.REC_WIDTH_BUCKETS, target_width=target_width,
+                )
+                logits = infer_first(self.rec_model, tensor, self.rec_request)
+                decoded = decode_ctc(np.asarray(logits), self.characters)
+                for index, value in zip(indices, decoded[:len(indices)], strict=True):
+                    results[index] = value
         return results
 
     def smoke_test(self) -> None:
@@ -172,9 +184,14 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
         canvas = np.full((256, 768, 3), 255, dtype=np.uint8)
         cv2.putText(canvas, "Visual Search 123", (35, 145), cv2.FONT_HERSHEY_SIMPLEX, 2.2, (0, 0, 0), 4)
         det_input, _, _ = preprocess_detection(canvas, self.DET_BUCKETS)
-        det_output = infer_first(self.det_model, det_input)
-        rec_input = preprocess_recognition([canvas[70:175, 20:730]], self.REC_WIDTH_BUCKETS)
-        rec_output = infer_first(self.rec_model, rec_input)
+        det_output = infer_first(self.det_model, det_input, self.det_request)
+        crop = canvas[70:175, 20:730]
+        target_width = recognition_width(crop, self.REC_WIDTH_BUCKETS)
+        batch_size = recognition_batch_capacity(target_width, self.recognition_batch_size)
+        rec_input = preprocess_recognition(
+            [crop] * batch_size, self.REC_WIDTH_BUCKETS, target_width=target_width,
+        )
+        rec_output = infer_first(self.rec_model, rec_input, self.rec_request)
         if not np.isfinite(det_output).all() or not np.isfinite(rec_output).all():
             raise RuntimeError("OpenVINO OCR smoke test returned invalid values")
         if np.asarray(rec_output).ndim != 3:
@@ -189,6 +206,7 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
                 "execution_devices": self.det_execution_devices,
                 "selected_device": self.device,
                 "optimal_infer_requests": self.det_optimal_requests,
+                "performance_hint": "LATENCY",
                 "loaded": True,
             },
             {
@@ -198,14 +216,16 @@ class OpenVinoPaddleOcrEngine(OcrEngine):
                 "execution_devices": self.rec_execution_devices,
                 "selected_device": self.device,
                 "optimal_infer_requests": self.rec_optimal_requests,
+                "performance_hint": "LATENCY",
                 "loaded": True,
             },
         ]
 
 
-def infer_first(compiled_model, tensor: np.ndarray) -> np.ndarray:
-    result = compiled_model({compiled_model.input(0): tensor})
-    return np.asarray(result[compiled_model.output(0)])
+def infer_first(compiled_model, tensor: np.ndarray, infer_request=None) -> np.ndarray:
+    request = infer_request or compiled_model.create_infer_request()
+    request.infer({compiled_model.input(0): tensor})
+    return np.array(request.get_output_tensor(0).data, copy=True)
 
 
 def decode_image(path: Path) -> np.ndarray:
@@ -258,12 +278,27 @@ def preprocess_detection(source: np.ndarray, buckets: tuple[tuple[int, int], ...
     return tensor, scale, (original_h, original_w)
 
 
-def preprocess_recognition(crops: list[np.ndarray], width_buckets: tuple[int, ...]) -> np.ndarray:
+def recognition_width(crop: np.ndarray, width_buckets: tuple[int, ...]) -> int:
+    target_h = 48
+    required = math.ceil(target_h * crop.shape[1] / max(crop.shape[0], 1))
+    return next((width for width in width_buckets if width >= required), width_buckets[-1])
+
+
+def recognition_batch_capacity(target_width: int, configured_batch_size: int) -> int:
+    # 8 x 320 is the baseline activation budget. Very wide text therefore runs
+    # with a smaller batch rather than multiplying its intermediate tensors.
+    return max(1, min(int(configured_batch_size), 2560 // max(1, int(target_width))))
+
+
+def preprocess_recognition(
+    crops: list[np.ndarray], width_buckets: tuple[int, ...], target_width: int | None = None,
+) -> np.ndarray:
     import cv2
 
     target_h = 48
-    required = max(math.ceil(target_h * crop.shape[1] / max(crop.shape[0], 1)) for crop in crops)
-    target_w = next((width for width in width_buckets if width >= required), width_buckets[-1])
+    target_w = int(target_width) if target_width is not None else max(
+        recognition_width(crop, width_buckets) for crop in crops
+    )
     batch = np.zeros((len(crops), 3, target_h, target_w), dtype=np.float32)
     for index, crop in enumerate(crops):
         ratio = crop.shape[1] / max(crop.shape[0], 1)

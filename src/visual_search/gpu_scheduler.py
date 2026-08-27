@@ -24,6 +24,23 @@ class InferenceCancelled(RuntimeError):
     pass
 
 
+class GpuRuntimeUnavailable(RuntimeError):
+    """The OpenVINO GPU plugin reported a fatal driver/resource failure."""
+
+
+GPU_FATAL_MARKERS = (
+    "CL_OUT_OF_RESOURCES",
+    "CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST",
+    "DEVICE_LOST",
+    "COULD NOT CREATE A MEMORY",
+)
+
+
+def is_gpu_fatal_error(error: BaseException) -> bool:
+    message = str(error).upper()
+    return any(marker in message for marker in GPU_FATAL_MARKERS)
+
+
 @dataclass(order=True)
 class _WorkItem(Generic[T]):
     priority: int
@@ -45,6 +62,7 @@ class GpuScheduler:
         self._interactive_count = 0
         self._stopping = threading.Event()
         self._active: _WorkItem | None = None
+        self._fault_message = ""
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
@@ -61,6 +79,11 @@ class GpuScheduler:
     def submit(self, function: Callable[[], T], priority: GpuPriority,
                generation: int | None = None) -> Future[T]:
         future: Future[T] = Future()
+        with self._lock:
+            fault_message = self._fault_message
+        if fault_message:
+            future.set_exception(GpuRuntimeUnavailable(fault_message))
+            return future
         self._queue.put(_WorkItem(int(priority), next(self._sequence), future, function, generation))
         return future
 
@@ -97,6 +120,8 @@ class GpuScheduler:
             "active_priority": active.priority if active else None,
             "active_generation": active.generation if active else None,
             "interactive_queries": self._interactive_count,
+            "faulted": bool(self._fault_message),
+            "fault": self._fault_message,
         }
 
     def shutdown(self, wait: bool = True) -> None:
@@ -114,6 +139,11 @@ class GpuScheduler:
                 break
             if item.future.cancelled():
                 continue
+            with self._lock:
+                fault_message = self._fault_message
+            if fault_message:
+                item.future.set_exception(GpuRuntimeUnavailable(fault_message))
+                continue
             if not self.is_current(item.generation):
                 item.future.set_exception(InferenceCancelled("Superseded by a newer search"))
                 continue
@@ -124,6 +154,16 @@ class GpuScheduler:
                     raise InferenceCancelled("Superseded by a newer search")
                 item.future.set_result(result)
             except BaseException as exc:
-                item.future.set_exception(exc)
+                if is_gpu_fatal_error(exc):
+                    message = (
+                        "Intel GPU runtime 發生致命資源錯誤；已停止派發後續推論，"
+                        "避免把剩餘圖片全部標成失敗。請重新啟動 Visual Search 後續跑。\n"
+                        + str(exc)
+                    )
+                    with self._lock:
+                        self._fault_message = message
+                    item.future.set_exception(GpuRuntimeUnavailable(message))
+                else:
+                    item.future.set_exception(exc)
             finally:
                 self._active = None

@@ -10,7 +10,7 @@ import tempfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRunnable, QSize, Qt, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QPointF, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QDialog, QFileDialog, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -915,7 +915,11 @@ class MainPage(QWidget):
             self.start_index(self._rescan_queue.pop(0), continue_rescan=True)
 
     def index_finished(self):
-        self.progress_label.setText("圖片分析完成")
+        if self.controller.last_stop_reason:
+            self.progress_label.setText(self.controller.last_stop_reason)
+            QMessageBox.warning(self, "GPU 索引已安全暫停", self.controller.last_stop_reason)
+        else:
+            self.progress_label.setText("圖片分析完成")
         self.ocr_diagnostics.refresh()
         self.refresh_model_status()
 
@@ -1329,6 +1333,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.pages)
         self.pages.setCurrentWidget(self.main if config.setup_complete else self.setup)
         self.setStyleSheet(STYLES)
+        if config.setup_complete and any(Path(root).is_dir() for root in config.roots):
+            QTimer.singleShot(0, self.main.rescan_all)
 
     def finish_setup(self, folder: str):
         self.config.setup_complete = True

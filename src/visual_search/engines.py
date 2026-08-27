@@ -104,8 +104,11 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
         cache = self.model_dir / "compiled_cache"
         cache.mkdir(exist_ok=True)
         core.set_property({"CACHE_DIR": str(cache)})
-        self.vision = core.compile_model(model_dir / "vision_model.xml", preferred, {"PERFORMANCE_HINT": "THROUGHPUT"})
-        self.text_model = core.compile_model(model_dir / "text_model.xml", preferred, {"PERFORMANCE_HINT": "LATENCY"})
+        config = serial_inference_config(preferred)
+        self.vision = core.compile_model(model_dir / "vision_model.xml", preferred, config)
+        self.text_model = core.compile_model(model_dir / "text_model.xml", preferred, config)
+        self.vision_request = self.vision.create_infer_request()
+        self.text_request = self.text_model.create_infer_request()
         self.vision_execution_devices = compiled_execution_devices(self.vision, preferred)
         self.text_execution_devices = compiled_execution_devices(self.text_model, preferred)
         self._base_positions = np.load(model_dir / "position_embedding.npy").astype(np.float32)
@@ -149,7 +152,7 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
             "pixel_values": pixel_values,
             "pixel_attention_mask": pixel_masks,
             "position_embeddings": np.concatenate(positions, axis=0),
-        })
+        }, self.vision_request)
         return [normalize_vector(row) for row in np.asarray(output)]
 
     def _image_from_pil(self, image: Image.Image) -> np.ndarray:
@@ -167,7 +170,7 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
             "pixel_attention_mask": pixel_mask,
             "position_embeddings": positions,
         }
-        output = infer_named(self.vision, values)
+        output = infer_named(self.vision, values, self.vision_request)
         return normalize_vector(output)
 
     def text(self, text: str) -> Vector:
@@ -175,7 +178,7 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
         if "attention_mask" not in inputs:
             inputs["attention_mask"] = np.ones_like(inputs["input_ids"], dtype=np.int64)
         values = {name: inputs[name] for name in ("input_ids", "attention_mask") if name in inputs}
-        output = infer_named(self.text_model, values)
+        output = infer_named(self.text_model, values, self.text_request)
         return normalize_vector(output)
 
     def smoke_test(self) -> None:
@@ -193,6 +196,10 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
                 "requested_device": self.device,
                 "execution_devices": self.vision_execution_devices,
                 "selected_device": self.device,
+                "performance_hint": "LATENCY",
+                "optimal_infer_requests": safe_compiled_property(
+                    self.vision, "OPTIMAL_NUMBER_OF_INFER_REQUESTS"
+                ),
                 "loaded": True,
             },
             {
@@ -201,12 +208,16 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
                 "requested_device": self.device,
                 "execution_devices": self.text_execution_devices,
                 "selected_device": self.device,
+                "performance_hint": "LATENCY",
+                "optimal_infer_requests": safe_compiled_property(
+                    self.text_model, "OPTIMAL_NUMBER_OF_INFER_REQUESTS"
+                ),
                 "loaded": True,
             },
         ]
 
 
-def infer_named(compiled_model, values: dict[str, np.ndarray]) -> np.ndarray:
+def infer_named(compiled_model, values: dict[str, np.ndarray], infer_request=None) -> np.ndarray:
     """Run an IR while tolerating harmless port-name suffixes from conversion."""
     prepared: dict[object, np.ndarray] = {}
     remaining = list(values.items())
@@ -219,8 +230,24 @@ def infer_named(compiled_model, values: dict[str, np.ndarray]) -> np.ndarray:
             match = remaining[0]
         prepared[port] = match[1]
         remaining.remove(match)
-    result = compiled_model(prepared)
-    return np.asarray(result[compiled_model.output(0)])
+    request = infer_request or compiled_model.create_infer_request()
+    request.infer(prepared)
+    return np.array(request.get_output_tensor(0).data, copy=True)
+
+
+def serial_inference_config(device: str) -> dict[str, str]:
+    """The application serializes GPU work, so extra OpenVINO streams only waste memory."""
+    config = {"PERFORMANCE_HINT": "LATENCY"}
+    if str(device).upper().startswith("GPU"):
+        config["NUM_STREAMS"] = "1"
+    return config
+
+
+def safe_compiled_property(compiled_model, name: str):
+    try:
+        return compiled_model.get_property(name)
+    except Exception:
+        return None
 
 
 def resize_position_embeddings(base: np.ndarray, height: int, width: int, max_length: int = 256) -> np.ndarray:

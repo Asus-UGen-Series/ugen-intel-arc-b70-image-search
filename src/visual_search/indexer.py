@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .domain import Asset, SearchDebugTrace, SearchHit
-from .gpu_scheduler import GpuPriority, GpuScheduler
+from .gpu_scheduler import GpuPriority, GpuRuntimeUnavailable, GpuScheduler
 from .interfaces import EmbeddingEngine, ObjectDetector, OcrEngine, VectorIndex
 from .scoring import effective_weights, merge_hits
 from .storage import SQLiteAssetRepository, asset_matches_metadata
@@ -20,7 +20,7 @@ from .vlm import VlmReranker
 LOGGER = logging.getLogger(__name__)
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 METADATA_VERSION = "metadata-thumbnail-v2"
-REGION_LAYOUT_VERSION = "adaptive-regions-v1"
+REGION_LAYOUT_VERSION = "adaptive-regions-v2-min1024"
 
 
 def _axis_starts(length: int, cells: int, overlap: float = 0.15) -> list[tuple[int, int]]:
@@ -35,7 +35,7 @@ def _axis_starts(length: int, cells: int, overlap: float = 0.15) -> list[tuple[i
 def adaptive_region_boxes(width: int, height: int) -> list[list[int]]:
     """Return at most six class-independent crops for small-object retrieval."""
     width, height = int(width), int(height)
-    if width <= 0 or height <= 0 or max(width, height) < 1280 or min(width, height) < 720:
+    if width <= 0 or height <= 0 or max(width, height) < 1024 or min(width, height) < 768:
         return []
     ratio = width / height
     if ratio >= 2.0:
@@ -78,6 +78,15 @@ class IndexController:
         self.embedding_version = str(getattr(embeddings, "model_version", embeddings.__class__.__name__))
         self.region_version = f"{self.embedding_version}-{REGION_LAYOUT_VERSION}"
         self.object_version = str(getattr(objects, "model_version", "")) if objects is not None else ""
+        self.last_stop_reason = ""
+        self.repository.queue_stale_stage("metadata", METADATA_VERSION)
+        self.repository.queue_stale_stage("ocr", self.ocr_version)
+        self.repository.queue_stale_stage("embedding", self.embedding_version)
+        if self.region_vectors is not None:
+            self.repository.queue_stale_stage("region_embedding", self.region_version)
+        if self.objects is not None:
+            self.repository.queue_stale_stage("object", self.object_version)
+        self.repository.queue_resolved_failures()
         self._restore_vectors()
 
     def _background_infer(self, function):
@@ -120,7 +129,7 @@ class IndexController:
             self.repository.stage_ready(asset_id, "embedding", self.embedding_version, checksum),
         ]
         if self.region_vectors is not None:
-            required.append(self.repository.stage_ready(
+            required.append(self.repository.stage_complete(
                 asset_id, "region_embedding", self.region_version, checksum
             ))
         if self.objects is not None:
@@ -129,10 +138,12 @@ class IndexController:
 
     def scan(self, root: Path, progress: Callable[[int, int, str], None] | None = None) -> None:
         self.cancel_event.clear()
+        self.last_stop_reason = ""
         self.repository.recover_interrupted_stages()
         files = [item for item in root.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED]
         self.repository.add_root(str(root))
         vectors_changed = False
+        completed_positions = 0
         for position, path in enumerate(files, 1):
             if self.cancel_event.is_set():
                 break
@@ -147,6 +158,7 @@ class IndexController:
                     and existing.size == stat.st_size and existing.modified_ns == stat.st_mtime_ns
                     and self._all_stages_ready(existing.id, existing.sha256)
                 ):
+                    completed_positions = position
                     continue
 
                 checksum = file_hash(path)
@@ -207,6 +219,11 @@ class IndexController:
                         )
                         asset = self.repository.get(asset_id) or asset
                         self.repository.set_stage(asset_id, "ocr", "ready", self.ocr_version, checksum)
+                    except GpuRuntimeUnavailable as exc:
+                        self._pause_after_gpu_fault(
+                            asset_id, "ocr", self.ocr_version, checksum, exc, errors
+                        )
+                        break
                     except Exception as exc:
                         message = f"ocr: {exc}"
                         errors.append(message)
@@ -221,6 +238,11 @@ class IndexController:
                         detections = self._background_infer(lambda: self.objects.detect(path))
                         self.repository.replace_objects(asset_id, detections)
                         self.repository.set_stage(asset_id, "object", "ready", self.object_version, checksum)
+                    except GpuRuntimeUnavailable as exc:
+                        self._pause_after_gpu_fault(
+                            asset_id, "object", self.object_version, checksum, exc, errors
+                        )
+                        break
                     except Exception as exc:
                         message = f"object: {exc}"
                         errors.append(message)
@@ -238,24 +260,45 @@ class IndexController:
                         asset.model_version = self.embedding_version
                         self.repository.upsert(asset)
                         self.repository.set_stage(asset_id, "embedding", "ready", self.embedding_version, checksum)
+                    except GpuRuntimeUnavailable as exc:
+                        self._pause_after_gpu_fault(
+                            asset_id, "embedding", self.embedding_version, checksum, exc, errors
+                        )
+                        break
                     except Exception as exc:
                         message = f"embedding: {exc}"
                         errors.append(message)
                         self.repository.set_stage(asset_id, "embedding", "error", self.embedding_version, checksum, str(exc))
                         LOGGER.exception("Embedding failed for %s", path)
 
-                if self.region_vectors is not None and not self.repository.stage_ready(
+                if self.region_vectors is not None and not self.repository.stage_complete(
                         asset_id, "region_embedding", self.region_version, checksum):
                     self.repository.set_stage(
                         asset_id, "region_embedding", "running", self.region_version, checksum
                     )
                     try:
                         boxes = adaptive_region_boxes(asset.width, asset.height)
-                        vectors = self._background_infer(
-                            lambda: self.embeddings.image_regions(path, boxes)
-                        ) if boxes else []
                         old_regions = self.repository.region_ids(asset_id)
                         self.region_vectors.remove(old_regions)
+                        if not boxes:
+                            self.repository.replace_region_embeddings(
+                                asset_id, [], [], self.region_version,
+                            )
+                            vectors_changed = vectors_changed or bool(old_regions)
+                            self.repository.set_stage(
+                                asset_id, "region_embedding", "skipped", self.region_version, checksum,
+                                "Image is below the region-index size threshold",
+                            )
+                            boxes = []
+                            vectors = []
+                        else:
+                            vectors = self._background_infer(
+                                lambda: self.embeddings.image_regions(path, boxes)
+                            )
+                            if len(vectors) != len(boxes):
+                                raise RuntimeError(
+                                    f"Region encoder returned {len(vectors)} vectors for {len(boxes)} boxes"
+                                )
                         regions = self.repository.replace_region_embeddings(
                             asset_id, boxes, [np.asarray(item, dtype=np.float32) for item in vectors],
                             self.region_version,
@@ -264,9 +307,15 @@ class IndexController:
                             if region.id is not None:
                                 self.region_vectors.add(region.id, region.vector)
                         vectors_changed = vectors_changed or bool(old_regions or regions)
-                        self.repository.set_stage(
-                            asset_id, "region_embedding", "ready", self.region_version, checksum
+                        if boxes:
+                            self.repository.set_stage(
+                                asset_id, "region_embedding", "ready", self.region_version, checksum
+                            )
+                    except GpuRuntimeUnavailable as exc:
+                        self._pause_after_gpu_fault(
+                            asset_id, "region_embedding", self.region_version, checksum, exc, errors
                         )
+                        break
                     except Exception as exc:
                         message = f"region_embedding: {exc}"
                         errors.append(message)
@@ -282,12 +331,13 @@ class IndexController:
                 if self.objects is not None:
                     stage_names.append("object")
                 required = [states.get(name, {}).get("status") for name in stage_names]
-                if all(status == "ready" for status in required):
+                if all(status in {"ready", "skipped"} for status in required):
                     self.repository.set_asset_status(asset_id, "ready")
                 elif any(status == "ready" for status in required):
                     self.repository.set_asset_status(asset_id, "partial", "; ".join(errors))
                 else:
                     self.repository.set_asset_status(asset_id, "error", "; ".join(errors) or "All index stages failed")
+                completed_positions = position
             except Exception as exc:
                 LOGGER.exception("Unable to index %s", path)
                 try:
@@ -305,7 +355,26 @@ class IndexController:
                 self.region_vectors.save()
         self.clean_missing()
         if progress:
-            progress(len(files), len(files), "完成")
+            if self.last_stop_reason:
+                progress(completed_positions, len(files), self.last_stop_reason)
+            elif self.cancel_event.is_set():
+                progress(completed_positions, len(files), "已取消；下次可接續未完成階段")
+            else:
+                progress(len(files), len(files), "完成")
+
+    def _pause_after_gpu_fault(
+        self, asset_id: int, stage: str, model_version: str, checksum: str,
+        error: GpuRuntimeUnavailable, errors: list[str],
+    ) -> None:
+        summary = str(error).splitlines()[0]
+        errors.append(f"{stage}: {summary}")
+        self.repository.set_stage(
+            asset_id, stage, "pending", model_version, checksum,
+            "GPU runtime fault; restart required before retry",
+        )
+        self.repository.set_asset_status(asset_id, "partial", "; ".join(errors))
+        self.last_stop_reason = "GPU 資源錯誤，索引已安全暫停；請重新啟動程式後按「重新掃描」續跑"
+        LOGGER.error("Indexing paused after fatal GPU error in %s: %s", stage, error)
 
     def clean_missing(self) -> None:
         missing = [asset.id for asset in self.repository.all_assets() if asset.id is not None and not Path(asset.path).exists()]
