@@ -15,6 +15,7 @@ application source, build scripts and configuration available.
   separately purchased Ultralytics Enterprise license.
 - PySide6/Qt: LGPL-3.0/GPL/commercial terms as distributed by Qt for Python.
 - USearch: Apache-2.0.
+- watchdog: Apache-2.0.
 
 Exact installed package versions are recorded in `sbom.json` next to the
 application executable.

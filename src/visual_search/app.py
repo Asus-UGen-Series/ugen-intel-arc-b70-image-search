@@ -120,8 +120,8 @@ def create_services(paths: AppPaths, config: AppConfig | None = None, registry: 
             logging.exception("VLM unavailable; deterministic search remains active")
             vlm = NoopVlmEngine()
     reranker = VlmReranker(
-        repository, vlm, scheduler, config.vlm_policy,
-        config.vlm_candidate_count, config.vlm_timeout_seconds,
+        repository, vlm, scheduler, policy=config.vlm_policy,
+        timeout_seconds=config.vlm_timeout_seconds, match_threshold=config.vlm_match_threshold,
     )
     controller = IndexController(
         repository, vectors, ocr, embeddings, paths.thumbnails,

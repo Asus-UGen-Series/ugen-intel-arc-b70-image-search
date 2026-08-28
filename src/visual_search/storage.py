@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from .domain import Asset, ObjectDetection, OcrLine, RegionEmbedding, SearchHit
+from .domain import Asset, ObjectDetection, OcrLine, RegionEmbedding, SearchHit, VlmVerdict
 from .interfaces import AssetRepository
 from .text import (
+    classify_query,
     compact_identifier,
     fts_query,
     identifier_tokens,
@@ -23,7 +25,7 @@ from .text import (
 )
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class SQLiteAssetRepository(AssetRepository):
@@ -129,6 +131,19 @@ class SQLiteAssetRepository(AssetRepository):
         );
         CREATE INDEX IF NOT EXISTS idx_object_asset ON object_detections(asset_id);
         CREATE INDEX IF NOT EXISTS idx_object_label ON object_detections(label, confidence DESC);
+        CREATE TABLE IF NOT EXISTS vlm_review_cache(
+          query_hash TEXT NOT NULL,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          asset_sha256 TEXT NOT NULL,
+          region_key TEXT NOT NULL,
+          model_revision TEXT NOT NULL,
+          image_size INTEGER NOT NULL,
+          match INTEGER NOT NULL,
+          hard_fail INTEGER NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY(query_hash,asset_id,region_key,model_revision,image_size)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vlm_cache_created ON vlm_review_cache(created_at);
         """)
         line_columns = {str(row[1]) for row in db.execute("PRAGMA table_info(ocr_lines)")}
         if "detection_confidence" not in line_columns:
@@ -239,15 +254,19 @@ class SQLiteAssetRepository(AssetRepository):
         self.upsert(asset)
         return asset
 
-    def text_search(self, query: str, limit: int = 100) -> list[SearchHit]:
+    def text_search(self, query: str, limit: int | None = 100) -> list[SearchHit]:
         expression = fts_query(query)
         if not expression:
             return []
-        rows = self._connection().execute(
+        sql = (
             "SELECT a.*, bm25(asset_fts) rank FROM asset_fts JOIN assets a ON a.id=asset_fts.asset_id "
-            "WHERE asset_fts MATCH ? AND a.status IN ('ready','partial') ORDER BY rank LIMIT ?",
-            (expression, max(limit, 1) * 4),
-        ).fetchall()
+            "WHERE asset_fts MATCH ? AND a.status IN ('ready','partial') ORDER BY rank"
+        )
+        parameters: tuple[object, ...] = (expression,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters += (max(int(limit), 1) * 4,)
+        rows = self._connection().execute(sql, parameters).fetchall()
         candidates: list[tuple[float, float, SearchHit]] = []
         query_normalized = normalize_text(query)
         query_compact = compact_identifier(query)
@@ -278,30 +297,34 @@ class SQLiteAssetRepository(AssetRepository):
                     line_trigrams = set(identifier_trigrams(line.text))
                     coverage = max(coverage, len(query_trigrams & line_trigrams) / len(query_trigrams))
             bonus = min(0.61, bonus)
+            if classify_query(query) == "identifier" and query_trigrams and coverage < 0.60 and bonus <= 0.0:
+                continue
             text_score = max(coverage, 1.0 / (1.0 + max(0.0, float(row["rank"]))))
             hit = SearchHit(asset, 0.0, text_score=text_score, text_rank=fts_rank,
                             bonus_score=bonus, reasons=list(dict.fromkeys(reasons)))
             candidates.append((bonus, coverage, hit))
         candidates.sort(key=lambda item: (item[0], item[1], -int(item[2].text_rank or 0)), reverse=True)
         result: list[SearchHit] = []
-        for rank, (_bonus, _coverage, hit) in enumerate(candidates[:limit], 1):
+        selected = candidates if limit is None else candidates[:max(0, int(limit))]
+        for rank, (_bonus, _coverage, hit) in enumerate(selected, 1):
             hit.text_rank = rank
             result.append(hit)
         return result
 
-    def metadata_search(self, query: str, limit: int = 200) -> list[SearchHit]:
+    def metadata_search(self, query: str, limit: int | None = 200) -> list[SearchHit]:
         filters = metadata_filters(query)
         if not filters:
             return []
         assets = [asset for asset in self.all_assets() if asset.status in ("ready", "partial")]
         assets = [asset for asset in assets if asset_matches_metadata(asset, filters)]
         assets.sort(key=lambda asset: asset.modified_ns, reverse=True)
+        selected = assets if limit is None else assets[:max(0, int(limit))]
         return [
             SearchHit(asset, 0.0, metadata_rank=rank, reasons=[metadata_reason(filters)])
-            for rank, asset in enumerate(assets[:limit], 1)
+            for rank, asset in enumerate(selected, 1)
         ]
 
-    def object_search(self, query: str, limit: int = 200) -> list[SearchHit]:
+    def object_search(self, query: str, limit: int | None = 200) -> list[SearchHit]:
         labels = object_query_labels(query)
         normalized_query = normalize_text(query)
         compact_query = normalized_query.replace(" ", "")
@@ -324,13 +347,17 @@ class SQLiteAssetRepository(AssetRepository):
         if not labels:
             return []
         placeholders = ",".join("?" for _ in labels)
-        rows = self._connection().execute(
+        sql = (
             f"SELECT a.*,COUNT(DISTINCT o.label) matched,MAX(o.confidence) confidence "
             f"FROM object_detections o JOIN assets a ON a.id=o.asset_id "
             f"WHERE o.label IN ({placeholders}) AND a.status IN ('ready','partial') "
-            "GROUP BY a.id ORDER BY matched DESC,confidence DESC LIMIT ?",
-            (*labels, max(1, int(limit))),
-        ).fetchall()
+            "GROUP BY a.id ORDER BY matched DESC,confidence DESC"
+        )
+        parameters: tuple[object, ...] = tuple(labels)
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters += (max(1, int(limit)),)
+        rows = self._connection().execute(sql, parameters).fetchall()
         return [
             SearchHit(
                 self._asset(row), 0.0, object_rank=rank,
@@ -595,6 +622,76 @@ class SQLiteAssetRepository(AssetRepository):
     def all_assets(self) -> list[Asset]:
         return [self._asset(row) for row in self._connection().execute("SELECT * FROM assets ORDER BY path")]
 
+    def eligible_assets(self, filters: dict[str, str] | None = None) -> list[Asset]:
+        assets = [asset for asset in self.all_assets() if asset.status in ("ready", "partial")]
+        if filters:
+            assets = [asset for asset in assets if asset_matches_metadata(asset, filters)]
+        return assets
+
+    def cached_vlm_verdict(
+        self, query_hash: str, asset_id: int, asset_sha256: str, region_key: str,
+        model_revision: str, image_size: int, ttl_seconds: int = 30 * 24 * 60 * 60,
+    ) -> VlmVerdict | None:
+        row = self._connection().execute(
+            "SELECT asset_sha256,match,hard_fail,created_at FROM vlm_review_cache "
+            "WHERE query_hash=? AND asset_id=? AND region_key=? AND model_revision=? AND image_size=?",
+            (query_hash, asset_id, region_key, model_revision, int(image_size)),
+        ).fetchone()
+        if row is None or str(row["asset_sha256"]) != str(asset_sha256):
+            return None
+        if int(row["created_at"]) < int(time.time()) - int(ttl_seconds):
+            return None
+        return VlmVerdict(int(row["match"]), bool(row["hard_fail"]))
+
+    def save_vlm_verdict(
+        self, query_hash: str, asset_id: int, asset_sha256: str, region_key: str,
+        model_revision: str, image_size: int, verdict: VlmVerdict,
+    ) -> None:
+        self.save_vlm_verdicts(
+            query_hash, model_revision, image_size,
+            [(asset_id, asset_sha256, region_key, verdict)],
+        )
+
+    def save_vlm_verdicts(
+        self, query_hash: str, model_revision: str, image_size: int,
+        rows: list[tuple[int, str, str, VlmVerdict]],
+    ) -> None:
+        if not rows:
+            return
+        db = self._connection()
+        now = int(time.time())
+        db.executemany(
+            "INSERT INTO vlm_review_cache(query_hash,asset_id,asset_sha256,region_key,model_revision,"
+            "image_size,match,hard_fail,created_at) VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(query_hash,asset_id,region_key,model_revision,image_size) DO UPDATE SET "
+            "asset_sha256=excluded.asset_sha256,match=excluded.match,hard_fail=excluded.hard_fail,"
+            "created_at=excluded.created_at",
+            [
+                (query_hash, asset_id, asset_sha256, region_key, model_revision, int(image_size),
+                 int(verdict.match), int(verdict.hard_fail), now)
+                for asset_id, asset_sha256, region_key, verdict in rows
+            ],
+        )
+        db.commit()
+
+    def purge_vlm_review_cache(
+        self, ttl_seconds: int = 30 * 24 * 60 * 60, max_entries: int = 100_000,
+    ) -> int:
+        db = self._connection()
+        before = int(db.execute("SELECT count(*) FROM vlm_review_cache").fetchone()[0])
+        db.execute("DELETE FROM vlm_review_cache WHERE created_at<?", (int(time.time()) - int(ttl_seconds),))
+        remaining = int(db.execute("SELECT count(*) FROM vlm_review_cache").fetchone()[0])
+        excess = max(0, remaining - max(1, int(max_entries)))
+        if excess:
+            db.execute(
+                "DELETE FROM vlm_review_cache WHERE rowid IN "
+                "(SELECT rowid FROM vlm_review_cache ORDER BY created_at ASC LIMIT ?)",
+                (excess,),
+            )
+        db.commit()
+        after = int(db.execute("SELECT count(*) FROM vlm_review_cache").fetchone()[0])
+        return before - after
+
     def delete_ids(self, ids: list[int]) -> None:
         if not ids:
             return
@@ -626,6 +723,8 @@ class SQLiteAssetRepository(AssetRepository):
                 "GROUP BY stage,error ORDER BY count DESC LIMIT 8"
             ).fetchall()
         ]
+        object_assets = int(db.execute("SELECT count(DISTINCT asset_id) FROM object_detections").fetchone()[0])
+        object_ready = int(stages.get("object", {}).get("ready", 0))
         return {
             "asset_status": self.counts_by_status(),
             "stages": stages,
@@ -635,8 +734,18 @@ class SQLiteAssetRepository(AssetRepository):
             "region_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM region_embeddings").fetchone()[0]),
             "ocr_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM ocr_lines").fetchone()[0]),
             "ocr_lines": int(db.execute("SELECT count(*) FROM ocr_lines").fetchone()[0]),
-            "object_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM object_detections").fetchone()[0]),
+            "object_assets": object_assets,
             "objects": int(db.execute("SELECT count(*) FROM object_detections").fetchone()[0]),
+            "object_stats": {
+                "total": int(db.execute("SELECT count(*) FROM assets").fetchone()[0]),
+                "ready": object_ready,
+                "pending": int(stages.get("object", {}).get("pending", 0)),
+                "running": int(stages.get("object", {}).get("running", 0)),
+                "error": int(stages.get("object", {}).get("error", 0)),
+                "with_detections": object_assets,
+                "zero_detections": max(0, object_ready - object_assets),
+                "detections": int(db.execute("SELECT count(*) FROM object_detections").fetchone()[0]),
+            },
         }
 
 

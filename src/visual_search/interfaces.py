@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .domain import Asset, ObjectDetection, OcrLine, SearchHit, Vector, VlmVerdict
+from .domain import Asset, ObjectDetection, OcrLine, SearchHit, Vector, VlmBatchVerdict, VlmVerdict
 
 
 class OcrEngine(ABC):
@@ -37,6 +37,18 @@ class VlmEngine(ABC):
     @abstractmethod
     def review(self, original_request: str, visual_target: str, image: Path,
                relevant_ocr: Sequence[str] = ()) -> VlmVerdict: ...
+
+    def review_batch(self, original_request: str, visual_target: str,
+                     images: Sequence[Path], relevant_ocr: Sequence[Sequence[str]] = ()) -> list[VlmBatchVerdict]:
+        """Default compatibility path for engines that only support one image."""
+        rows = list(relevant_ocr)
+        return [
+            VlmBatchVerdict(index, self.review(
+                original_request, visual_target, image,
+                rows[index] if index < len(rows) else (),
+            ))
+            for index, image in enumerate(images)
+        ]
 
     @abstractmethod
     def runtime_details(self) -> list[dict[str, object]]: ...
@@ -77,3 +89,6 @@ class VectorIndex(ABC):
 
     @abstractmethod
     def contains(self, key: int) -> bool: ...
+
+    def size(self) -> int:
+        return 0

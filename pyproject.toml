@@ -24,6 +24,7 @@ dependencies = [
   "torchvision>=0.22,<1",
   "sentencepiece>=0.2",
   "usearch>=2.16",
+  "watchdog>=6.0,<7",
 ]
 
 [project.optional-dependencies]

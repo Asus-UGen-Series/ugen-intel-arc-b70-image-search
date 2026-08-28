@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+
+
+class SearchMode(str, Enum):
+    SMART_COMPLETE = "smart_complete"
+    EXHAUSTIVE = "exhaustive"
 
 
 @dataclass(slots=True)
@@ -55,6 +61,12 @@ class VlmVerdict:
 
 
 @dataclass(slots=True)
+class VlmBatchVerdict:
+    candidate_id: int
+    verdict: VlmVerdict
+
+
+@dataclass(slots=True)
 class Asset:
     id: int | None
     path: str
@@ -99,6 +111,36 @@ class SearchHit:
 
 
 @dataclass(slots=True)
+class SearchProgress:
+    candidate_total: int
+    reviewed: int = 0
+    qualified: int = 0
+    rejected: int = 0
+    cached: int = 0
+    remaining: int = 0
+    complete: bool = False
+    mode: SearchMode = SearchMode.SMART_COMPLETE
+    results: list[SearchHit] = field(default_factory=list)
+    error: str = ""
+
+
+@dataclass(slots=True)
+class SearchSession:
+    generation: int
+    query: str
+    mode: SearchMode
+    candidate_total: int
+    reviewed: int = 0
+    qualified: int = 0
+    rejected: int = 0
+    cached: int = 0
+    complete: bool = False
+    results: list[SearchHit] = field(default_factory=list)
+    error: str = ""
+    reranker_source: str = "deterministic"
+
+
+@dataclass(slots=True)
 class SearchDebugTrace:
     """One developer-only snapshot of the complete retrieval and rerank path."""
 
@@ -113,6 +155,7 @@ class SearchDebugTrace:
     final_results: list[SearchHit] = field(default_factory=list)
     reranker_requested: bool = False
     reranker_source: str = "deterministic"
+    dynamic_retrieval: dict[str, Any] = field(default_factory=dict)
     formula: str = "deterministic = min(1, 0.75 x weighted_RRF + bonus)"
 
 

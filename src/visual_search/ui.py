@@ -7,13 +7,14 @@ import sys
 import subprocess
 import shutil
 import tempfile
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, QPointF, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QDialog, QFileDialog, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
     QListWidgetItem,
     QComboBox, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
@@ -21,10 +22,12 @@ from PySide6.QtWidgets import (
 
 from .config import AppConfig
 from .engines import ColorFallbackEmbedding, NoopOcrEngine, detect_openvino_devices
-from .domain import SearchDebugTrace
+from .domain import SearchDebugTrace, SearchMode, SearchProgress
 from .indexer import IndexController, SearchService
+from .library_monitor import LibraryMonitor
 from .models import OCR_MODEL_ID, ModelManager, ModelRegistry
 from .paths import AppPaths
+from .text import metadata_filters
 
 LOGGER = logging.getLogger(__name__)
 
@@ -338,6 +341,39 @@ class ResultCard(QFrame):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.path))
 
 
+class ResultListModel(QAbstractListModel):
+    HitRole = int(Qt.UserRole) + 1
+
+    def __init__(self):
+        super().__init__()
+        self.hits = []
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.hits)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self.hits):
+            return None
+        hit = self.hits[index.row()]
+        if role == Qt.DecorationRole:
+            return QIcon(hit.asset.thumbnail)
+        if role == Qt.DisplayRole:
+            name = Path(hit.asset.path).name
+            score = round(hit.score * 100)
+            vlm = f" · VLM {round(hit.vlm_score * 100)}" if hit.vlm_score is not None else ""
+            return f"{name}\n排名 {score}%{vlm}"
+        if role == Qt.ToolTipRole:
+            return "\n".join([hit.asset.path, *hit.reasons[:8]])
+        if role == self.HitRole:
+            return hit
+        return None
+
+    def set_hits(self, hits) -> None:
+        self.beginResetModel()
+        self.hits = list(hits)
+        self.endResetModel()
+
+
 class StatusCard(QFrame):
     def __init__(self, title: str, state: str, detail: str, tone: str = "ok"):
         super().__init__()
@@ -361,23 +397,24 @@ class StatusCard(QFrame):
 
 class SearchSignals(QObject):
     finished = Signal(int, object)
-    progress = Signal(int, int, int)
+    progress = Signal(int, object)
     failed = Signal(int, str)
 
 
 class SearchWorker(QRunnable):
-    def __init__(self, service: SearchService, query: str, generation: int):
+    def __init__(self, service: SearchService, query: str, generation: int, mode: SearchMode):
         super().__init__()
-        self.service, self.query, self.generation = service, query, generation
+        self.service, self.query, self.generation, self.mode = service, query, generation, mode
         self.signals = SearchSignals()
 
     @Slot()
     def run(self):
         try:
             hits = self.service.search(
-                self.query, 10,
-                lambda current, total: self.signals.progress.emit(self.generation, current, total),
+                self.query, None,
+                lambda update: self.signals.progress.emit(self.generation, update),
                 generation=self.generation,
+                mode=self.mode,
             )
             self.signals.finished.emit(self.generation, hits)
         except Exception as exc:
@@ -568,7 +605,8 @@ class DeveloperSearchPage(QWidget):
             "召回層｜SigLIP 全圖找整體畫面；SigLIP 局部找小物件；OCR／檔名找精確文字；"
             "YOLOE 提供固定開放詞彙的軟候選；Metadata 處理日期、格式與資料夾。\n"
             "融合層｜各通道先各取候選，再以加權 RRF 合併；完整檔名、OCR 片語與程式碼識別字另加 bonus。\n"
-            "審核層｜visual／mixed 查詢可把 deterministic Top 30 交給 Qwen3.5；最後為 70% VLM + 30% deterministic。"
+            "審核層｜visual／mixed 查詢會把動態候選集合全部交給 Qwen3.5；"
+            "達到所選門檻的結果全部保留，最後為 70% VLM + 30% deterministic。"
         )
         architecture.setWordWrap(True)
         architecture.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -675,15 +713,22 @@ class DeveloperSearchPage(QWidget):
             f"公式：{trace.formula}；VLM 啟用時 final = 0.70 × VLM + 0.30 × deterministic"
         )
         counts = trace.candidate_counts
+        semantic_dynamic = trace.dynamic_retrieval.get("semantic", {})
+        region_dynamic = trace.dynamic_retrieval.get("region", {})
         self.candidate_summary.setText(
             "候選數｜"
             f"全圖 {counts.get('semantic_raw', 0)} → {counts.get('semantic', 0)}；"
             f"局部向量 {counts.get('region_vectors_raw', 0)} → 圖片 {counts.get('region', 0)}；"
             f"文字 {counts.get('text_raw', 0)} → {counts.get('text', 0)}；"
             f"物件 {counts.get('object_raw', 0)} → {counts.get('object', 0)}；"
-            f"Metadata {counts.get('metadata', 0)}；聯集 Top {counts.get('union', 0)}；"
+            f"Metadata {counts.get('metadata', 0)}；完整聯集 {counts.get('union', 0)}；"
             f"VLM {counts.get('vlm_evaluated', 0)}/{counts.get('vlm_input', 0)}；"
-            f"最終 {counts.get('final', len(trace.final_results))}。審核來源：{trace.reranker_source}"
+            f"最終 {counts.get('final', len(trace.final_results))}。審核來源：{trace.reranker_source}\n"
+            f"動態召回｜全圖 cutoff={float(semantic_dynamic.get('cutoff', 0)):.4f}、"
+            f"{len(semantic_dynamic.get('rounds', []))} 輪、停止={semantic_dynamic.get('stop_reason', '—')}；"
+            f"局部 cutoff={float(region_dynamic.get('cutoff', 0)):.4f}、"
+            f"{len(region_dynamic.get('rounds', []))} 輪、停止={region_dynamic.get('stop_reason', '—')}；"
+            f"模式={trace.dynamic_retrieval.get('mode', '—')}"
         )
         coverage = trace.index_coverage
         status = coverage.get("asset_status", {})
@@ -731,7 +776,7 @@ class DeveloperSearchPage(QWidget):
             elif hit.vlm_hard_fail:
                 destination = "VLM hard_fail 移除"
             elif trace.reranker_requested and row < vlm_input and hit.vlm_score is not None:
-                destination = "VLM 後掉出 Top 10"
+                destination = "VLM 分數未達門檻"
             elif trace.reranker_requested and row < vlm_input:
                 destination = "VLM 未完成／回退"
             else:
@@ -790,7 +835,7 @@ class DeveloperSearchPage(QWidget):
                     + ("；VLM hard_fail" if hit.vlm_hard_fail else "；屬於排名／VLM 問題")
                 )
             else:
-                location = "未進 deterministic Top 60；屬於召回、索引覆蓋或 hard filter 問題"
+                location = "未進動態 deterministic 候選聯集；屬於召回、索引覆蓋或 hard filter 問題"
             details.append(
                 f"{asset.path}\n狀態 {asset.status}；{location}\n"
                 f"階段 {stage_text}；OCR {len(ocr_lines)} 行（可搜尋 {sum(line.searchable for line in ocr_lines)}）；"
@@ -817,8 +862,10 @@ class MainPage(QWidget):
         if self.developer_mode:
             self.search_service.set_debug_enabled(True)
         self.search_generation = 0
+        self._last_result_render = 0.0
         self.pool = QThreadPool.globalInstance()
         self._rescan_queue: list[str] = []
+        self.library_monitor = LibraryMonitor(controller, config.roots)
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Visual Search")
@@ -833,6 +880,26 @@ class MainPage(QWidget):
         header.addWidget(self.query, 1)
         header.addWidget(search_button)
         layout.addLayout(header)
+        search_options = QHBoxLayout()
+        search_options.addWidget(QLabel("搜尋完整度"))
+        self.search_mode_choice = QComboBox()
+        self.search_mode_choice.addItem("智慧完整（推薦）", SearchMode.SMART_COMPLETE.value)
+        self.search_mode_choice.addItem("徹底檢查全部圖片", SearchMode.EXHAUSTIVE.value)
+        mode_index = self.search_mode_choice.findData(config.search_mode)
+        self.search_mode_choice.setCurrentIndex(max(0, mode_index))
+        search_options.addWidget(self.search_mode_choice)
+        search_options.addWidget(QLabel("結果精準度"))
+        self.match_threshold_choice = QComboBox()
+        self.match_threshold_choice.addItem("較多結果（60分）", 60)
+        self.match_threshold_choice.addItem("平衡（70分）", 70)
+        self.match_threshold_choice.addItem("較精準（85分）", 85)
+        threshold_index = self.match_threshold_choice.findData(config.vlm_match_threshold)
+        self.match_threshold_choice.setCurrentIndex(max(0, threshold_index))
+        search_options.addWidget(self.match_threshold_choice)
+        self.search_mode_choice.currentIndexChanged.connect(self.save_search_preferences)
+        self.match_threshold_choice.currentIndexChanged.connect(self.save_search_preferences)
+        search_options.addStretch()
+        layout.addLayout(search_options)
         self.capability_banner = QLabel()
         self.capability_banner.setWordWrap(True)
         layout.addWidget(self.capability_banner)
@@ -841,13 +908,19 @@ class MainPage(QWidget):
         layout.addWidget(self.search_status)
         self.tabs = QTabWidget()
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.results_widget = QWidget()
-        self.results_layout = QGridLayout(self.results_widget)
-        self.results_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.results_widget)
-        self.tabs.addTab(scroll, "搜尋結果")
+        self.results_model = ResultListModel()
+        self.results_view = QListView()
+        self.results_view.setModel(self.results_model)
+        self.results_view.setViewMode(QListView.IconMode)
+        self.results_view.setResizeMode(QListView.Adjust)
+        self.results_view.setMovement(QListView.Static)
+        self.results_view.setUniformItemSizes(True)
+        self.results_view.setWordWrap(True)
+        self.results_view.setIconSize(QSize(220, 150))
+        self.results_view.setGridSize(QSize(260, 220))
+        self.results_view.setSpacing(8)
+        self.results_view.activated.connect(self.open_result)
+        self.tabs.addTab(self.results_view, "搜尋結果")
         self.library = QWidget()
         library_layout = QVBoxLayout(self.library)
         self.roots = QListWidget()
@@ -866,7 +939,10 @@ class MainPage(QWidget):
         controls.addWidget(rescan)
         self.progress = QProgressBar()
         self.progress_label = QLabel("尚未建立索引")
-        for widget in (self.roots, add, self.progress_label, self.progress):
+        self.monitor_status = QLabel("異動監看尚未啟動")
+        self.monitor_status.setObjectName("muted")
+        self.monitor_status.setWordWrap(True)
+        for widget in (self.roots, add, self.progress_label, self.progress, self.monitor_status):
             library_layout.addWidget(widget)
         library_layout.addLayout(controls)
         self.tabs.addTab(self.library, "圖片資料夾")
@@ -888,6 +964,11 @@ class MainPage(QWidget):
             self.developer_tab_index = self.tabs.addTab(self.developer_diagnostics, "搜尋除錯（開發者）")
         self.refresh_model_status()
         layout.addWidget(self.tabs)
+        self.monitor_timer = QTimer(self)
+        self.monitor_timer.timeout.connect(self.refresh_monitor_status)
+        self.monitor_timer.start(3000)
+        if config.setup_complete and config.roots:
+            QTimer.singleShot(0, self.start_monitor)
 
     def add_folder(self):
         selected = QFileDialog.getExistingDirectory(self, "加入圖片資料夾")
@@ -895,7 +976,31 @@ class MainPage(QWidget):
             self.config.roots.append(selected)
             self.config.save(self.paths.config)
             self.roots.addItem(selected)
+            self.library_monitor.add_root(Path(selected))
+            self.start_monitor()
             self.start_index(selected)
+
+    def start_monitor(self):
+        for root in self.config.roots:
+            self.library_monitor.add_root(Path(root))
+        self.library_monitor.start()
+        self.refresh_monitor_status()
+
+    def stop_monitor(self):
+        self.library_monitor.stop()
+
+    def refresh_monitor_status(self):
+        status = self.library_monitor.snapshot()
+        state = "正在監看" if status.get("watching") else "未啟用"
+        detail = (
+            f"{state} {int(status.get('roots', 0))} 個資料夾 · "
+            f"待處理異動 {int(status.get('pending', 0))}"
+        )
+        if status.get("last_scan"):
+            detail += f" · 最近校正 {status['last_scan']}"
+        if status.get("error"):
+            detail += f" · 錯誤：{status['error']}"
+        self.monitor_status.setText(detail)
 
     def start_index(self, root: str, continue_rescan: bool = False):
         worker = IndexWorker(self.controller, Path(root))
@@ -941,39 +1046,77 @@ class MainPage(QWidget):
         query = self.query.text().strip()
         if not query:
             return
-        self._clear_layout(self.results_layout)
-        self.results_layout.addWidget(QLabel("正在建立候選結果並進行最終審核…"), 0, 0, 1, 4)
+        self.results_model.set_hits([])
+        mode = SearchMode(str(self.search_mode_choice.currentData()))
+        threshold = int(self.match_threshold_choice.currentData())
+        self.config.search_mode = mode.value
+        self.config.vlm_match_threshold = threshold
+        self.config.save(self.paths.config)
+        if self.search_service.reranker is not None:
+            self.search_service.reranker.match_threshold = threshold
+        if mode == SearchMode.EXHAUSTIVE:
+            filters = metadata_filters(query)
+            total = len(self.controller.repository.eligible_assets(filters))
+            answer = QMessageBox.question(
+                self, "徹底檢查全部圖片",
+                f"這會讓Qwen逐批檢查 {total:,} 張圖片，可能需要很長時間。\n\n確定繼續嗎？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self.search_status.setText("正在建立完整候選集合…")
         if self.search_service.scheduler is not None:
             self.search_generation = self.search_service.scheduler.next_generation()
         else:
             self.search_generation += 1
-        worker = SearchWorker(self.search_service, query, self.search_generation)
+        worker = SearchWorker(self.search_service, query, self.search_generation, mode)
         worker.signals.progress.connect(self.on_search_progress)
         worker.signals.finished.connect(self.on_search_finished)
         worker.signals.failed.connect(self.on_search_failed)
         self.pool.start(worker)
 
-    @Slot(int, int, int)
-    def on_search_progress(self, generation: int, current: int, total: int):
+    def save_search_preferences(self, _index=None):
+        self.config.search_mode = str(self.search_mode_choice.currentData())
+        self.config.vlm_match_threshold = int(self.match_threshold_choice.currentData())
+        self.config.save(self.paths.config)
+        if self.search_service.reranker is not None:
+            self.search_service.reranker.match_threshold = self.config.vlm_match_threshold
+
+    @Slot(int, object)
+    def on_search_progress(self, generation: int, update):
         if generation == self.search_generation:
-            self.search_status.setText(f"初步找到 {total} 張，Qwen3.5 正在審核 {current}/{total}…")
+            if isinstance(update, SearchProgress):
+                now = time.monotonic()
+                if update.complete or now - self._last_result_render >= 0.5:
+                    self.results_model.set_hits(update.results)
+                    self._last_result_render = now
+                suffix = "，排名仍可能變動" if not update.complete else ""
+                self.search_status.setText(
+                    f"候選 {update.candidate_total:,} · 已審核 {update.reviewed:,} · "
+                    f"符合 {update.qualified:,} · 快取 {update.cached:,}{suffix}"
+                )
 
     @Slot(int, object)
     def on_search_finished(self, generation: int, hits):
         if generation != self.search_generation:
             return
-        self._clear_layout(self.results_layout)
-        if not hits:
-            self.results_layout.addWidget(QLabel("找不到符合的圖片。試試圖片中的文字、檔名或更簡短的描述。"), 0, 0, 1, 4)
-        for index, hit in enumerate(hits):
-            self.results_layout.addWidget(ResultCard(hit), index // 4, index % 4)
-        source = hits[0].rerank_source if hits else "deterministic"
-        if source == "qwen3.5":
-            self.search_status.setText("已完成 Qwen3.5 最終圖片審核。")
-        elif source == "deterministic-fallback":
-            self.search_status.setText("VLM 未能完成，本次已安全改用混合搜尋結果。")
+        self.results_model.set_hits(hits)
+        session = self.search_service.session(generation)
+        source = hits[0].rerank_source if hits else (session.reranker_source if session else "deterministic")
+        if session is not None and not session.complete:
+            self.search_status.setText(
+                f"審核未完成：已審核 {session.reviewed:,}/{session.candidate_total:,}，"
+                f"保留 {len(hits):,} 張已驗證結果。重新搜尋可從快取續跑。"
+            )
+        elif source.startswith("qwen3.5"):
+            self.search_status.setText(
+                f"完整審核完成：{session.candidate_total if session else 0:,} 張候選中有 {len(hits):,} 張符合。"
+            )
         else:
-            self.search_status.setText("本次為精確／條件查詢，已使用可解釋的混合搜尋結果。")
+            self.search_status.setText(
+                f"本次為精確／條件查詢，共找到 {len(hits):,} 張可解釋結果。"
+                if hits else "找不到符合的圖片。試試圖片中的文字、檔名或更簡短的描述。"
+            )
         if self.developer_diagnostics is not None:
             self.developer_diagnostics.show_trace(self.search_service.debug_trace(generation))
             self.tabs.setTabText(self.developer_tab_index, "搜尋除錯（有新資料）")
@@ -982,11 +1125,20 @@ class MainPage(QWidget):
     def on_search_failed(self, generation: int, error: str):
         if generation != self.search_generation:
             return
-        self._clear_layout(self.results_layout)
-        self.results_layout.addWidget(QLabel(f"搜尋失敗：{error}"), 0, 0, 1, 4)
+        self.results_model.set_hits([])
         self.search_status.setText("搜尋發生錯誤，請到模型與效能頁查看狀態。")
         if self.developer_diagnostics is not None:
             self.developer_diagnostics.query_summary.setText(f"搜尋在建立完整 trace 前失敗：{error}")
+
+    @Slot(QModelIndex)
+    def open_result(self, index: QModelIndex):
+        hit = self.results_model.data(index, ResultListModel.HitRole)
+        if hit is None:
+            return
+        if os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", str(Path(hit.asset.path))])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(hit.asset.path))
 
     @staticmethod
     def _package_version(name: str) -> str:
@@ -1106,6 +1258,8 @@ class MainPage(QWidget):
         object_devices = sorted({device for item in object_runtime for device in item.get("execution_devices", [])})
         object_ready = self.controller.objects is not None
         object_details = object_runtime[0] if object_runtime else {}
+        coverage = self.controller.repository.index_coverage()
+        object_stats = coverage.get("object_stats", {})
         vocabulary_size = int(object_details.get("vocabulary_size", 0) or 0)
         object_name = str(object_details.get("scale", self.config.active_object_profile)).upper()
         active_object_manager = self.registry.object_manager(self.config.active_object_profile)
@@ -1124,7 +1278,13 @@ class MainPage(QWidget):
             object_state = "尚未安裝"
             object_tone = "warning"
         object_detail = (
-            f"固定開放詞彙：{vocabulary_size:,} · 實際裝置：{', '.join(object_devices) or '—'}"
+            f"固定開放詞彙：{vocabulary_size:,} · 實際裝置：{', '.join(object_devices) or '—'}\n"
+            f"已推論 {int(object_stats.get('ready', 0)):,}/{int(object_stats.get('total', 0)):,} · "
+            f"待處理 {int(object_stats.get('pending', 0)):,} · 執行中 {int(object_stats.get('running', 0)):,} · "
+            f"失敗 {int(object_stats.get('error', 0)):,}\n"
+            f"有偵測 {int(object_stats.get('with_detections', 0)):,} 張 · "
+            f"零偵測 {int(object_stats.get('zero_detections', 0)):,} 張 · "
+            f"偵測框 {int(object_stats.get('detections', 0)):,} 個"
             if object_ready else f"預期位置：{active_object_manager.root}"
         )
         cards.addWidget(StatusCard(
@@ -1343,7 +1503,13 @@ class MainWindow(QMainWindow):
         self.main.roots.clear()
         self.main.roots.addItems(self.config.roots)
         self.pages.setCurrentWidget(self.main)
+        self.main.library_monitor.add_root(Path(folder))
+        self.main.start_monitor()
         self.main.start_index(folder)
+
+    def closeEvent(self, event):
+        self.main.stop_monitor()
+        super().closeEvent(event)
 
 
 STYLES = """

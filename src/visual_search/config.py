@@ -16,9 +16,10 @@ class AppConfig:
     vlm_setup_complete: bool = False
     active_vlm_profile: str = "qwen35-9b-int8"
     vlm_local_path: str = ""
-    vlm_candidate_count: int = 30
     vlm_timeout_seconds: int = 60
     vlm_image_size: int = 448
+    search_mode: str = "smart_complete"
+    vlm_match_threshold: int = 70
 
     @classmethod
     def load(cls, path: Path) -> "AppConfig":
@@ -32,10 +33,13 @@ class AppConfig:
                 config.vlm_policy = "auto"
             if config.active_object_profile not in {"yoloe26s-pf", "yoloe26m-pf"}:
                 config.active_object_profile = "yoloe26s-pf"
-            config.vlm_candidate_count = max(1, min(int(config.vlm_candidate_count), 30))
             config.vlm_timeout_seconds = max(5, min(int(config.vlm_timeout_seconds), 300))
             if config.vlm_image_size not in {336, 384, 448}:
                 config.vlm_image_size = 448
+            if config.search_mode not in {"smart_complete", "exhaustive"}:
+                config.search_mode = "smart_complete"
+            threshold = int(config.vlm_match_threshold)
+            config.vlm_match_threshold = threshold if threshold in {60, 70, 85} else 70
             return config
         except Exception:
             return cls()

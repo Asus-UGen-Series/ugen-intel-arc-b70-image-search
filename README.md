@@ -10,7 +10,7 @@ Visual Search 是完全在本機執行的 Windows 圖片搜尋工具。使用者
 - PP-OCRv6 Medium OpenVINO：高解析度自適應分塊 OCR。
 - YOLOE-26S／M Prompt-Free FP16 OpenVINO：固定開放詞彙的物件偵測，只作軟加分。
 - SigLIP2 區域索引：每張高解析圖片建立最多六個類別無關局部向量，補足 YOLOE 詞彙之外的小物件。
-- Qwen3.5 9B INT8／INT4 OpenVINO：選配的最終 Top 30 視覺審核。
+- Qwen3.5 9B INT8／INT4 OpenVINO：選配的完整候選視覺審核；結果數量不設上限。
 - SQLite FTS5：路徑、EXIF、OCR、物件與階段狀態。
 - USearch：向量近鄰索引；SQLite 保留向量備份。
 
@@ -22,7 +22,11 @@ VLM 只接收使用者原句、整理出的可見條件、圖片，以及最多�
 {"match": 91, "hard_fail": false}
 ```
 
-無效 JSON、逾時、取消、OOM 或模型未安裝時，整次查詢回退 deterministic Top 10，不混用不完整的 VLM 結果。精確檔名、OCR 片語、型號與程式碼 identifier 命中不會被 VLM 刪除。
+「智慧完整」會動態擴張全圖與局部向量召回，並審核候選集合內每一張圖片；「徹底檢查」則審核 metadata 條件後的整個圖片庫。預設保留 `match >= 70` 且非 `hard_fail` 的所有結果，也可切換為 60 或 85 分。精確檔名、OCR 片語、型號與程式碼 identifier 命中不會被 VLM 刪除。
+
+多圖 JSON 無效時只重試該批，再自動退回逐張；逾時、取消或 OOM 時會保留已驗證結果並清楚標示「審核未完成」，未審核圖片不會混入最終結果。相同查詢與相同圖片的 verdict 會在本機快取 30 天；查詢明文與額外圖片不會寫入快取。
+
+圖片資料夾由 `watchdog` 即時遞迴監看，事件經防抖與檔案穩定檢查後只重跑受影響圖片；另以 15 分鐘 reconciliation scan 補回睡眠或事件溢位期間的異動。根目錄暫時離線時不會誤刪整個索引。
 
 ## 開發版執行
 
@@ -54,7 +58,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe launcher.py --resume-index
 ```
 
-診斷輸出包含 OpenVINO runtime、實際執行裝置、SigLIP、OCR、YOLOE、VLM 的載入狀態、區域向量數、模型來源與 GPU 排程狀態。
+診斷輸出包含 OpenVINO runtime、實際執行裝置、SigLIP、OCR、YOLOE、VLM 的載入狀態、區域向量數、模型來源與 GPU 排程狀態。模型與效能頁另外區分 YOLOE 已推論、待處理、執行中、失敗、有框圖片、零偵測圖片與偵測框總數；「已推論」不再和「有偵測框」混為一談。
 `--resume-index` 只接續 pending、error、版本過期的階段，不會清除已完成的 OCR 或 embedding。開發機也可執行 `quick-test.cmd repair`。
 
 索引模型以 `LATENCY`、單一 stream 編譯，因所有 GPU 工作已由應用程式排程器序列化；這可避免 `THROUGHPUT` 為多模型配置不會被使用的平行 stream 與額外中間記憶體。若 Intel GPU 回報 `CL_OUT_OF_RESOURCES` 或 driver event failure，排程器會熔斷並安全暫停索引，保留其餘圖片為待續跑狀態，重新啟動後即可接續。
@@ -127,10 +131,10 @@ quick-test.cmd app
 這個入口會設定 `VISUAL_SEARCH_DEVELOPER_MODE=1`，並顯示正式版沒有的「搜尋除錯（開發者）」頁。頁面會保存最近一次查詢的本機 trace，包含：
 
 - 查詢類型與實際套用的 SigLIP 全圖、SigLIP 局部、OCR／檔名、YOLOE、Metadata 權重。
-- 各通道套用 hard filter 前後的候選數、每張圖的原始相似度、名次、RRF 分數與加權貢獻。
+- 各通道套用 hard filter 前後的候選數、向量召回每輪擴張大小／尾端分數／cutoff／停止原因，以及每張圖的原始相似度、名次、RRF 分數與加權貢獻。
 - exact filename／OCR phrase／identifier bonus、deterministic 分數、VLM 分數、`hard_fail` 與最後分數。
 - ready／partial／error 數量，以及 embedding、region、OCR、object 各索引階段的覆蓋率。
-- 指定一個預期檔名後，判斷它是未進召回 Top 60，還是進入候選後被排名／VLM 移除。
+- 指定一個預期檔名後，判斷它是未進動態候選聯集，還是進入候選後被 VLM 拒絕或審核尚未完成。
 
 評分公式為：
 
@@ -174,9 +178,9 @@ dist/sbom.json
 ## 發行驗收
 
 - 在 Intel Arc B70 執行 `--diagnose`，確認四個模型的 `execution_devices` 是 Intel GPU。
-- 使用固定資料集測量 INT8／INT4 Top 1、Top 3、Top 10、hard-fail 誤判率與 Top 30 p50／p95。
+- 使用固定資料集測量 INT8／INT4 的合格結果 precision／recall、hard-fail 誤判率，以及 100／300／1,000 候選的 p50／p95。
 - 驗證全圖與區域 SigLIP 各自可召回候選；YOLOE 結果不得作 hard filter。
-- INT8 Top 30 暖機 p95 必須不超過 60 秒；若 448px 超時，依序測試 384／336，品質退化超過 2% 就阻止發布。
+- 比較 VLM batch 4／2／1 的 OOM、延遲與合格判定；使用不 OOM且相對逐張準確率退化不超過 2% 的最大 batch。若 448px 超時，依序測試 384／336，品質退化超過 2% 就阻止發布。
 - 在沒有 Python、Winget、Git、Docker 的乾淨 Windows 10／11 測試安裝、首次啟動、下載、索引、搜尋、解除安裝與重新安裝。
 
 ## 授權

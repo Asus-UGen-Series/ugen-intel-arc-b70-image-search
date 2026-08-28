@@ -40,3 +40,6 @@ class USearchVectorIndex(VectorIndex):
 
     def contains(self, key: int) -> bool:
         return key in self.index
+
+    def size(self) -> int:
+        return len(self.index)

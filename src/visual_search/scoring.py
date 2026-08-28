@@ -29,7 +29,7 @@ def merge_hits(
     query: str,
     semantic: list[SearchHit],
     textual: list[SearchHit],
-    limit: int = 60,
+    limit: int | None = 60,
     objects: list[SearchHit] | None = None,
     metadata: list[SearchHit] | None = None,
     regions: list[SearchHit] | None = None,
@@ -116,4 +116,5 @@ def merge_hits(
             for reason in hit.reasons
         )
         hit.reasons = list(dict.fromkeys(hit.reasons))
-    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:limit]
+    ordered = sorted(merged.values(), key=lambda item: item.score, reverse=True)
+    return ordered if limit is None else ordered[:max(0, int(limit))]

@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageOps
 
-from .domain import Asset, SearchDebugTrace, SearchHit
+from .domain import Asset, SearchDebugTrace, SearchHit, SearchMode, SearchSession
 from .gpu_scheduler import GpuPriority, GpuRuntimeUnavailable, GpuScheduler
 from .interfaces import EmbeddingEngine, ObjectDetector, OcrEngine, VectorIndex
 from .scoring import effective_weights, merge_hits
@@ -79,6 +80,7 @@ class IndexController:
         self.region_version = f"{self.embedding_version}-{REGION_LAYOUT_VERSION}"
         self.object_version = str(getattr(objects, "model_version", "")) if objects is not None else ""
         self.last_stop_reason = ""
+        self._scan_lock = threading.Lock()
         self.repository.queue_stale_stage("metadata", METADATA_VERSION)
         self.repository.queue_stale_stage("ocr", self.ocr_version)
         self.repository.queue_stale_stage("embedding", self.embedding_version)
@@ -136,11 +138,27 @@ class IndexController:
             required.append(self.repository.stage_ready(asset_id, "object", self.object_version, checksum))
         return all(required)
 
-    def scan(self, root: Path, progress: Callable[[int, int, str], None] | None = None) -> None:
+    def scan(self, root: Path, progress: Callable[[int, int, str], None] | None = None,
+             selected_paths: list[Path] | None = None, cleanup: bool = True) -> None:
+        with self._scan_lock:
+            self._scan_locked(root, progress, selected_paths, cleanup)
+
+    def _scan_locked(self, root: Path, progress: Callable[[int, int, str], None] | None,
+                     selected_paths: list[Path] | None, cleanup: bool) -> None:
         self.cancel_event.clear()
         self.last_stop_reason = ""
         self.repository.recover_interrupted_stages()
-        files = [item for item in root.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED]
+        if selected_paths is None:
+            if not root.is_dir():
+                if progress:
+                    progress(0, 0, "資料夾目前無法存取；既有索引已保留")
+                return
+            files = [item for item in root.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED]
+        else:
+            files = [
+                Path(item) for item in dict.fromkeys(selected_paths)
+                if Path(item).is_file() and Path(item).suffix.lower() in SUPPORTED
+            ]
         self.repository.add_root(str(root))
         vectors_changed = False
         completed_positions = 0
@@ -353,7 +371,8 @@ class IndexController:
             self.vectors.save()
             if self.region_vectors is not None:
                 self.region_vectors.save()
-        self.clean_missing()
+        if cleanup and selected_paths is None:
+            self.clean_missing(root)
         if progress:
             if self.last_stop_reason:
                 progress(completed_positions, len(files), self.last_stop_reason)
@@ -376,8 +395,23 @@ class IndexController:
         self.last_stop_reason = "GPU 資源錯誤，索引已安全暫停；請重新啟動程式後按「重新掃描」續跑"
         LOGGER.error("Indexing paused after fatal GPU error in %s: %s", stage, error)
 
-    def clean_missing(self) -> None:
-        missing = [asset.id for asset in self.repository.all_assets() if asset.id is not None and not Path(asset.path).exists()]
+    def clean_missing(self, root: Path | None = None) -> None:
+        if root is not None and not root.is_dir():
+            return
+        resolved_root = root.resolve() if root is not None else None
+        missing = []
+        for asset in self.repository.all_assets():
+            if asset.id is None:
+                continue
+            asset_path = Path(asset.path)
+            if resolved_root is not None:
+                try:
+                    if not asset_path.resolve().is_relative_to(resolved_root):
+                        continue
+                except (OSError, ValueError):
+                    continue
+            if not asset_path.exists():
+                missing.append(asset.id)
         region_ids = [region_id for asset_id in missing for region_id in self.repository.region_ids(asset_id)]
         self.vectors.remove(missing)
         if self.region_vectors is not None:
@@ -387,6 +421,21 @@ class IndexController:
             self.vectors.save()
             if self.region_vectors is not None:
                 self.region_vectors.save()
+
+    def remove_path(self, path: Path) -> bool:
+        with self._scan_lock:
+            asset = self.repository.get_by_path(str(path))
+            if asset is None or asset.id is None:
+                return False
+            region_ids = self.repository.region_ids(asset.id)
+            self.vectors.remove([asset.id])
+            if self.region_vectors is not None:
+                self.region_vectors.remove(region_ids)
+            self.repository.delete_ids([asset.id])
+            self.vectors.save()
+            if self.region_vectors is not None:
+                self.region_vectors.save()
+            return True
 
 
 class SearchService:
@@ -401,6 +450,7 @@ class SearchService:
         self._debug_enabled = False
         self._debug_lock = threading.Lock()
         self._debug_traces: dict[int, SearchDebugTrace] = {}
+        self._sessions: dict[int, SearchSession] = {}
 
     def set_debug_enabled(self, enabled: bool) -> None:
         self._debug_enabled = bool(enabled)
@@ -420,27 +470,69 @@ class SearchService:
             for old_generation in sorted(self._debug_traces)[:-8]:
                 self._debug_traces.pop(old_generation, None)
 
-    def search(self, query: str, limit: int = 10, progress=None,
-               generation: int | None = None) -> list[SearchHit]:
+    def session(self, generation: int) -> SearchSession | None:
+        return self._sessions.get(int(generation))
+
+    def _store_session(self, session: SearchSession) -> None:
+        self._sessions[session.generation] = session
+        for old_generation in sorted(self._sessions)[:-8]:
+            self._sessions.pop(old_generation, None)
+
+    @staticmethod
+    def _dynamic_matches(index: VectorIndex, vector: np.ndarray, start: int) -> tuple[list[tuple[int, float]], dict[str, object]]:
+        size = max(0, int(getattr(index, "size", lambda: 0)()))
+        requested = min(max(1, int(start)), size) if size else max(1, int(start))
+        rounds: list[dict[str, object]] = []
+        matches: list[tuple[int, float]] = []
+        cutoff = 0.05
+        stop_reason = "empty"
+        while requested > 0:
+            matches = index.search(vector, requested)
+            if not matches:
+                stop_reason = "empty"
+                break
+            best = float(matches[0][1])
+            tail = float(matches[-1][1])
+            cutoff = max(0.05, best - 0.25)
+            rounds.append({"requested": requested, "returned": len(matches), "best": best,
+                           "tail": tail, "cutoff": cutoff})
+            if tail < cutoff:
+                stop_reason = "tail_below_cutoff"
+                break
+            if size and requested >= size:
+                stop_reason = "index_exhausted"
+                break
+            if not size or len(matches) < requested:
+                stop_reason = "available_results_exhausted"
+                break
+            requested = min(size, requested * 2)
+        selected = [(key, score) for key, score in matches if float(score) >= cutoff]
+        return selected, {"rounds": rounds, "cutoff": cutoff, "stop_reason": stop_reason,
+                          "selected": len(selected), "index_size": size}
+
+    def search(self, query: str, limit: int | None = None, progress=None,
+               generation: int | None = None,
+               mode: SearchMode = SearchMode.SMART_COMPLETE) -> list[SearchHit]:
         if generation is None:
             generation = self.scheduler.next_generation() if self.scheduler is not None else 0
-        if self.scheduler is not None:
-            with self.scheduler.interactive():
-                return self._search(query, limit, progress, generation)
-        return self._search(query, limit, progress, generation)
+        if not isinstance(mode, SearchMode):
+            mode = SearchMode(str(mode))
+        return self._search(query, limit, progress, generation, mode)
 
-    def _search(self, query: str, limit: int, progress, generation: int) -> list[SearchHit]:
-        deterministic_limit = max(60, limit, self.reranker.candidate_count if self.reranker else 0)
+    def _search(self, query: str, limit: int | None, progress, generation: int,
+                mode: SearchMode) -> list[SearchHit]:
         filters = metadata_filters(query)
         semantic = []
-        if self.scheduler is None:
-            query_vector = self.embeddings.text(query)
-        else:
-            query_vector = self.scheduler.run(
-                lambda: self.embeddings.text(query), GpuPriority.QUERY_EMBEDDING,
-                generation=generation,
-            )
-        semantic_matches = self.vectors.search(query_vector, max(deterministic_limit, 200))
+        retrieval_guard = self.scheduler.interactive() if self.scheduler is not None else nullcontext()
+        with retrieval_guard:
+            if self.scheduler is None:
+                query_vector = self.embeddings.text(query)
+            else:
+                query_vector = self.scheduler.run(
+                    lambda: self.embeddings.text(query), GpuPriority.QUERY_EMBEDDING,
+                    generation=generation,
+                )
+        semantic_matches, semantic_diagnostics = self._dynamic_matches(self.vectors, query_vector, 256)
         for rank, (key, score) in enumerate(semantic_matches, 1):
             asset = self.repository.get(key)
             if (asset and asset.status in ("ready", "partial")
@@ -448,9 +540,10 @@ class SearchService:
                 semantic.append(SearchHit(asset, score, semantic_score=score, semantic_rank=rank))
         regions: list[SearchHit] = []
         region_matches: list[tuple[int, float]] = []
+        region_diagnostics: dict[str, object] = {"rounds": [], "cutoff": 0.05, "stop_reason": "disabled"}
         if self.region_vectors is not None:
             best: dict[int, tuple[float, Asset, list[int]]] = {}
-            region_matches = self.region_vectors.search(query_vector, max(500, deterministic_limit))
+            region_matches, region_diagnostics = self._dynamic_matches(self.region_vectors, query_vector, 1024)
             lookup = self.repository.region_lookup_many([key for key, _score in region_matches])
             for key, score in region_matches:
                 match = lookup.get(key)
@@ -461,25 +554,35 @@ class SearchService:
                     continue
                 if asset.id is not None and (asset.id not in best or score > best[asset.id][0]):
                     best[asset.id] = (score, asset, box)
-            ordered = sorted(best.values(), key=lambda item: item[0], reverse=True)[:200]
+            ordered = sorted(best.values(), key=lambda item: item[0], reverse=True)
             for rank, (score, asset, box) in enumerate(ordered, 1):
                 regions.append(SearchHit(
                     asset, score, region_rank=rank, region_score=score, matched_region=box,
                     reasons=["局部語意命中"],
                 ))
-        textual_raw = self.repository.text_search(query, max(deterministic_limit, 200))
+        textual_raw = self.repository.text_search(query, None)
         textual = textual_raw
         if filters:
             textual = [hit for hit in textual if asset_matches_metadata(hit.asset, filters)]
-        metadata = self.repository.metadata_search(query, max(deterministic_limit, 200))
-        objects_raw = self.repository.object_search(query, max(deterministic_limit, 200))
+        metadata = self.repository.metadata_search(query, None)
+        objects_raw = self.repository.object_search(query, None)
         objects = objects_raw
         if filters:
             objects = [hit for hit in objects if asset_matches_metadata(hit.asset, filters)]
         results = merge_hits(
             query, semantic, textual,
-            deterministic_limit, objects=objects, metadata=metadata, regions=regions,
+            None, objects=objects, metadata=metadata, regions=regions,
         )
+        if mode == SearchMode.EXHAUSTIVE:
+            present = {hit.asset.id for hit in results if hit.asset.id is not None}
+            query_type = classify_query(query)
+            for asset in self.repository.eligible_assets(filters):
+                if asset.id in present:
+                    continue
+                results.append(SearchHit(
+                    asset, 0.0, deterministic_score=0.0, query_type=query_type,
+                    reasons=["徹底檢查：整庫候選"],
+                ))
         reranker_requested = bool(self.reranker and self.reranker.should_run(query, results))
         trace = None
         if self._debug_enabled:
@@ -511,29 +614,37 @@ class SearchService:
                 index_coverage=self.repository.index_coverage(),
                 deterministic_candidates=list(results),
                 reranker_requested=reranker_requested,
+                dynamic_retrieval={"semantic": semantic_diagnostics, "region": region_diagnostics,
+                                   "mode": mode.value},
             )
             self._store_debug_trace(trace)
         if self.reranker is not None:
-            final = self.reranker.rerank(query, results, generation, progress)
+            rerank_guard = (
+                self.scheduler.interactive()
+                if self.scheduler is not None and mode == SearchMode.SMART_COMPLETE and reranker_requested
+                else nullcontext()
+            )
+            with rerank_guard:
+                session = self.reranker.rerank_session(query, results, generation, progress, mode)
+            self._store_session(session)
+            final = session.results
             self.last_rerank_source = (
-                final[0].rerank_source if final else
-                ("qwen3.5" if reranker_requested else "deterministic")
+                final[0].rerank_source if final else session.reranker_source
             )
             if trace is not None:
-                trace.final_results = list(final[:limit])
+                trace.final_results = list(final)
                 trace.reranker_source = self.last_rerank_source
-                trace.candidate_counts["vlm_input"] = (
-                    min(self.reranker.candidate_count, len(results)) if trace.reranker_requested else 0
-                )
-                trace.candidate_counts["vlm_evaluated"] = sum(
-                    hit.vlm_score is not None for hit in results[:self.reranker.candidate_count]
-                )
-                trace.candidate_counts["final"] = len(final[:limit])
+                trace.candidate_counts["vlm_input"] = len(results) if trace.reranker_requested else 0
+                trace.candidate_counts["vlm_evaluated"] = session.reviewed
+                trace.candidate_counts["final"] = len(final)
                 self._store_debug_trace(trace)
-            return final[:limit]
+            return final if limit is None else final[:max(0, int(limit))]
         self.last_rerank_source = "deterministic"
+        session = SearchSession(generation, query, mode, len(results), reviewed=len(results),
+                                qualified=len(results), complete=True, results=list(results))
+        self._store_session(session)
         if trace is not None:
-            trace.final_results = list(results[:limit])
+            trace.final_results = list(results)
             trace.reranker_source = self.last_rerank_source
             self._store_debug_trace(trace)
-        return results[:limit]
+        return results if limit is None else results[:max(0, int(limit))]
