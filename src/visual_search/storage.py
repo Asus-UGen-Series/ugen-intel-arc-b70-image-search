@@ -619,6 +619,11 @@ class SQLiteAssetRepository(AssetRepository):
         db.execute("INSERT OR IGNORE INTO roots(path) VALUES(?)", (path,))
         db.commit()
 
+    def remove_root(self, path: str) -> None:
+        db = self._connection()
+        db.execute("DELETE FROM roots WHERE path=?", (path,))
+        db.commit()
+
     def all_assets(self) -> list[Asset]:
         return [self._asset(row) for row in self._connection().execute("SELECT * FROM assets ORDER BY path")]
 
@@ -726,9 +731,13 @@ class SQLiteAssetRepository(AssetRepository):
         object_assets = int(db.execute("SELECT count(DISTINCT asset_id) FROM object_detections").fetchone()[0])
         object_ready = int(stages.get("object", {}).get("ready", 0))
         return {
+            "total_assets": int(db.execute("SELECT count(*) FROM assets").fetchone()[0]),
             "asset_status": self.counts_by_status(),
             "stages": stages,
             "stage_errors": stage_errors,
+            "metadata_assets": int(db.execute(
+                "SELECT count(*) FROM assets WHERE width>0 AND height>0 AND thumbnail<>''"
+            ).fetchone()[0]),
             "full_embeddings": int(db.execute("SELECT count(*) FROM asset_embeddings").fetchone()[0]),
             "region_vectors": int(db.execute("SELECT count(*) FROM region_embeddings").fetchone()[0]),
             "region_assets": int(db.execute("SELECT count(DISTINCT asset_id) FROM region_embeddings").fetchone()[0]),

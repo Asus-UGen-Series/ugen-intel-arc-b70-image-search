@@ -158,6 +158,19 @@ def diagnose(paths: AppPaths) -> int:
         "database": str(paths.database),
         "indexed_images": repository.count(),
         "index_status": repository.counts_by_status(),
+        "index_coverage": repository.index_coverage(),
+        "index_paths": {
+            "database": str(paths.database),
+            "database_wal": str(Path(str(paths.database) + "-wal")),
+            "full_vectors": str(getattr(controller.vectors, "path", paths.vectors)),
+            "region_vectors": str(getattr(
+                controller.region_vectors, "path", paths.vectors.with_name("regions.usearch")
+            )),
+            "thumbnails": str(paths.thumbnails),
+            "models": str(paths.models),
+            "config": str(paths.config),
+            "logs": str(paths.logs),
+        },
         "openvino": detect_openvino_devices(),
         "semantic_model": {
             "id": manager.model_id,

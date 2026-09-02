@@ -73,6 +73,9 @@ class AssetRepository(ABC):
     @abstractmethod
     def add_root(self, path: str) -> None: ...
 
+    @abstractmethod
+    def remove_root(self, path: str) -> None: ...
+
 
 class VectorIndex(ABC):
     @abstractmethod

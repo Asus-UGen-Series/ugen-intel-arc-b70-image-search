@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
     QDialog, QFileDialog, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
     QListWidgetItem,
     QComboBox, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+    QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget
 )
 
 from .config import AppConfig
@@ -51,6 +52,26 @@ class IndexWorker(QRunnable):
             self.signals.finished.emit()
         except Exception as exc:
             LOGGER.exception("Indexing failed")
+            self.signals.failed.emit(str(exc))
+
+
+class RootRemovalSignals(QObject):
+    finished = Signal(int)
+    failed = Signal(str)
+
+
+class RootRemovalWorker(QRunnable):
+    def __init__(self, controller: IndexController, root: Path, keep_roots: list[Path]):
+        super().__init__()
+        self.controller, self.root, self.keep_roots = controller, root, keep_roots
+        self.signals = RootRemovalSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            self.signals.finished.emit(self.controller.remove_root(self.root, self.keep_roots))
+        except Exception as exc:
+            LOGGER.exception("Unable to remove image root")
             self.signals.failed.emit(str(exc))
 
 
@@ -586,9 +607,12 @@ class DeveloperSearchPage(QWidget):
         "metadata": "Metadata",
     }
 
-    def __init__(self, repository):
+    def __init__(self, repository, paths: AppPaths, vectors=None, region_vectors=None):
         super().__init__()
         self.repository = repository
+        self.paths = paths
+        self.vectors = vectors
+        self.region_vectors = region_vectors
         self.trace: SearchDebugTrace | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 18)
@@ -613,6 +637,45 @@ class DeveloperSearchPage(QWidget):
         layout.addWidget(title)
         layout.addWidget(warning)
         layout.addWidget(architecture)
+
+        index_title = QLabel("背景索引漏斗（即時）")
+        index_title.setObjectName("sectionTitle")
+        index_help = QLabel(
+            "每一關的『完成』代表模型真正跑過；『實際有資料』可區分 OCR／YOLOE 跑完但沒有文字或物件的圖片。"
+        )
+        index_help.setObjectName("muted")
+        index_help.setWordWrap(True)
+        self.index_tree = QTreeWidget()
+        self.index_tree.setColumnCount(7)
+        self.index_tree.setHeaderLabels([
+            "處理關卡", "完成", "實際有資料", "待處理", "執行中", "失敗", "補充",
+        ])
+        self.index_tree.setAlternatingRowColors(True)
+        self.index_tree.setMinimumHeight(245)
+        tree_header = self.index_tree.header()
+        tree_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, 6):
+            tree_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        tree_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.index_locations = QLabel()
+        self.index_locations.setObjectName("locationBox")
+        self.index_locations.setWordWrap(True)
+        self.index_locations.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        index_buttons = QHBoxLayout()
+        refresh_index = QPushButton("重新整理索引漏斗")
+        refresh_index.clicked.connect(self.refresh_index_overview)
+        open_index = QPushButton("開啟索引資料夾")
+        open_index.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.root)))
+        )
+        index_buttons.addWidget(refresh_index)
+        index_buttons.addWidget(open_index)
+        index_buttons.addStretch()
+        layout.addWidget(index_title)
+        layout.addWidget(index_help)
+        layout.addWidget(self.index_tree)
+        layout.addWidget(self.index_locations)
+        layout.addLayout(index_buttons)
 
         self.query_summary = QLabel("完成一次搜尋後，這裡會顯示該次完整 trace。")
         self.query_summary.setWordWrap(True)
@@ -658,6 +721,101 @@ class DeveloperSearchPage(QWidget):
         self.table.setWordWrap(True)
         self.table.verticalHeader().setDefaultSectionSize(64)
         layout.addWidget(self.table, 1)
+        self.refresh_index_overview()
+
+    @staticmethod
+    def _stage_values(coverage: dict[str, object], stage: str) -> tuple[int, int, int, int, int]:
+        total = int(coverage.get("total_assets", 0))
+        states = dict(coverage.get("stages", {}).get(stage, {}))
+        ready = int(states.get("ready", 0))
+        skipped = int(states.get("skipped", 0))
+        running = int(states.get("running", 0))
+        error = int(states.get("error", 0))
+        explicit_pending = int(states.get("pending", 0))
+        known = sum(int(value) for value in states.values())
+        pending = explicit_pending + max(0, total - known)
+        return ready, skipped, pending, running, error
+
+    @staticmethod
+    def _path_status(path: Path) -> str:
+        if not path.exists():
+            return "尚未建立"
+        if path.is_file():
+            size = path.stat().st_size
+            if size >= 1024 ** 2:
+                return f"{size / 1024 ** 2:.1f} MiB"
+            return f"{size / 1024:.1f} KiB"
+        return "資料夾"
+
+    def refresh_index_overview(self, coverage: dict[str, object] | None = None) -> None:
+        coverage = coverage or self.repository.index_coverage()
+        total = int(coverage.get("total_assets", 0))
+        assets = dict(coverage.get("asset_status", {}))
+        self.index_tree.clear()
+        library = QTreeWidgetItem([
+            "圖片庫（已掃描檔案）", f"{total:,}", f"{total:,}", "—", "—", "—",
+            "原始圖片不會複製到索引資料夾",
+        ])
+        self.index_tree.addTopLevelItem(library)
+
+        def add_stage(parent, label: str, stage: str, actual: int, note: str = ""):
+            ready, skipped, pending, running, error = self._stage_values(coverage, stage)
+            completed = ready + skipped
+            item = QTreeWidgetItem([
+                label, f"{completed:,}", f"{actual:,}", f"{pending:,}", f"{running:,}",
+                f"{error:,}", note + (f"；略過 {skipped:,}" if skipped else ""),
+            ])
+            parent.addChild(item)
+            return item
+
+        add_stage(library, "1. Metadata／縮圖", "metadata", int(coverage.get("metadata_assets", 0)), "解碼、尺寸、縮圖")
+        semantic = QTreeWidgetItem(["2. SigLIP2 語意索引", "", "", "", "", "", ""])
+        library.addChild(semantic)
+        add_stage(
+            semantic, "2a. 全圖 embedding", "embedding", int(coverage.get("full_embeddings", 0)),
+            "SQLite 備份＋USearch",
+        )
+        add_stage(
+            semantic, "2b. 局部 embedding", "region_embedding", int(coverage.get("region_assets", 0)),
+            f"{int(coverage.get('region_vectors', 0)):,} 個局部向量",
+        )
+        add_stage(
+            library, "3. PP-OCRv6", "ocr", int(coverage.get("ocr_assets", 0)),
+            f"{int(coverage.get('ocr_lines', 0)):,} 行文字；0 行也可能是正常完成",
+        )
+        add_stage(
+            library, "4. YOLOE-26", "object", int(coverage.get("object_assets", 0)),
+            f"{int(coverage.get('objects', 0)):,} 個框；0 框也可能是正常完成",
+        )
+        ready_assets = int(assets.get("ready", 0))
+        partial_assets = int(assets.get("partial", 0))
+        final = QTreeWidgetItem([
+            "5. 全部必要關卡完成", f"{ready_assets:,}", f"{ready_assets + partial_assets:,}",
+            f"{partial_assets:,}", f"{int(assets.get('indexing', 0)):,}",
+            f"{int(assets.get('error', 0)):,}", "partial 仍可搜尋，但背景處理尚未完成",
+        ])
+        library.addChild(final)
+        library.setExpanded(True)
+        semantic.setExpanded(True)
+
+        full_vector = Path(getattr(self.vectors, "path", self.paths.vectors))
+        region_vector = Path(getattr(
+            self.region_vectors, "path", self.paths.vectors.with_name("regions.usearch")
+        ))
+        wal = Path(str(self.paths.database) + "-wal")
+        locations = [
+            ("SQLite metadata／OCR／YOLOE／向量備份", self.paths.database),
+            ("SQLite WAL", wal),
+            ("SigLIP2 全圖 USearch", full_vector),
+            ("SigLIP2 局部 USearch", region_vector),
+            ("縮圖", self.paths.thumbnails),
+            ("模型", self.paths.models),
+            ("設定", self.paths.config),
+            ("日誌", self.paths.logs),
+        ]
+        self.index_locations.setText("索引實際位置\n" + "\n".join(
+            f"{name}：{path}（{self._path_status(path)}）" for name, path in locations
+        ))
 
     @staticmethod
     def _mapping_text(values: dict[str, object]) -> str:
@@ -865,6 +1023,7 @@ class MainPage(QWidget):
         self._last_result_render = 0.0
         self.pool = QThreadPool.globalInstance()
         self._rescan_queue: list[str] = []
+        self._active_index_jobs = 0
         self.library_monitor = LibraryMonitor(controller, config.roots)
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -920,13 +1079,27 @@ class MainPage(QWidget):
         self.results_view.setGridSize(QSize(260, 220))
         self.results_view.setSpacing(8)
         self.results_view.activated.connect(self.open_result)
-        self.tabs.addTab(self.results_view, "搜尋結果")
+        self.results_page = QWidget()
+        results_layout = QVBoxLayout(self.results_page)
+        results_layout.setContentsMargins(0, 8, 0, 0)
+        self.background_index_status = QLabel("正在讀取背景圖片分析狀態…")
+        self.background_index_status.setWordWrap(True)
+        self.background_index_status.setObjectName("capabilityWarning")
+        results_layout.addWidget(self.background_index_status)
+        results_layout.addWidget(self.results_view, 1)
+        self.tabs.addTab(self.results_page, "搜尋結果")
         self.library = QWidget()
         library_layout = QVBoxLayout(self.library)
         self.roots = QListWidget()
         self.roots.addItems(config.roots)
         add = QPushButton("加入圖片資料夾")
         add.clicked.connect(self.add_folder)
+        self.remove_folder_button = QPushButton("移除選取資料夾")
+        self.remove_folder_button.clicked.connect(self.remove_selected_folder)
+        folder_buttons = QHBoxLayout()
+        folder_buttons.addWidget(add)
+        folder_buttons.addWidget(self.remove_folder_button)
+        folder_buttons.addStretch()
         controls = QHBoxLayout()
         self.pause = QPushButton("暫停")
         self.pause.clicked.connect(self.toggle_pause)
@@ -942,8 +1115,9 @@ class MainPage(QWidget):
         self.monitor_status = QLabel("異動監看尚未啟動")
         self.monitor_status.setObjectName("muted")
         self.monitor_status.setWordWrap(True)
-        for widget in (self.roots, add, self.progress_label, self.progress, self.monitor_status):
+        for widget in (self.roots, self.progress_label, self.progress, self.monitor_status):
             library_layout.addWidget(widget)
+        library_layout.insertLayout(1, folder_buttons)
         library_layout.addLayout(controls)
         self.tabs.addTab(self.library, "圖片資料夾")
         self.ocr_diagnostics = OcrDiagnosticPage(self.controller.repository)
@@ -960,7 +1134,10 @@ class MainPage(QWidget):
         self.models_scroll.setWidget(self.models_page)
         self.tabs.addTab(self.models_scroll, "模型與效能")
         if self.developer_mode:
-            self.developer_diagnostics = DeveloperSearchPage(self.controller.repository)
+            self.developer_diagnostics = DeveloperSearchPage(
+                self.controller.repository, self.paths, self.controller.vectors,
+                self.controller.region_vectors,
+            )
             self.developer_tab_index = self.tabs.addTab(self.developer_diagnostics, "搜尋除錯（開發者）")
         self.refresh_model_status()
         layout.addWidget(self.tabs)
@@ -972,13 +1149,72 @@ class MainPage(QWidget):
 
     def add_folder(self):
         selected = QFileDialog.getExistingDirectory(self, "加入圖片資料夾")
-        if selected and selected not in self.config.roots:
+        selected_key = str(Path(selected).resolve()).casefold() if selected else ""
+        existing = {
+            str(Path(root).resolve()).casefold() for root in self.config.roots
+        }
+        if selected and selected_key not in existing:
             self.config.roots.append(selected)
             self.config.save(self.paths.config)
             self.roots.addItem(selected)
             self.library_monitor.add_root(Path(selected))
             self.start_monitor()
             self.start_index(selected)
+
+    def remove_selected_folder(self):
+        item = self.roots.currentItem()
+        if item is None:
+            QMessageBox.information(self, "請選擇資料夾", "請先在清單中選擇要移除的圖片資料夾。")
+            return
+        selected = item.text()
+        answer = QMessageBox.question(
+            self, "移除圖片資料夾",
+            "這會停止監看此資料夾，並移除它專屬的縮圖、OCR、物件與向量索引。\n\n"
+            "原始圖片不會被刪除。確定繼續嗎？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        remaining = [root for root in self.config.roots if root != selected]
+        self.stop_monitor()
+        self.controller.cancel()
+        self.remove_folder_button.setEnabled(False)
+        self.progress_label.setText(f"正在移除索引：{selected}")
+        worker = RootRemovalWorker(
+            self.controller, Path(selected), [Path(root) for root in remaining],
+        )
+        self._root_removal_worker = worker
+        worker.signals.finished.connect(
+            lambda removed, root=selected, roots=remaining: self.folder_removed(root, roots, removed)
+        )
+        worker.signals.failed.connect(
+            lambda error, root=selected: self.folder_remove_failed(root, error)
+        )
+        self.pool.start(worker)
+
+    def folder_remove_failed(self, selected: str, error: str):
+        self.remove_folder_button.setEnabled(True)
+        self.progress_label.setText("資料夾移除失敗")
+        self.library_monitor.add_root(Path(selected))
+        self.start_monitor()
+        QMessageBox.warning(self, "無法移除資料夾", error)
+
+    def folder_removed(self, selected: str, remaining: list[str], removed: int):
+        self.config.roots = remaining
+        self.config.save(self.paths.config)
+        for match in self.roots.findItems(selected, Qt.MatchExactly):
+            self.roots.takeItem(self.roots.row(match))
+        self._rescan_queue = [root for root in self._rescan_queue if root != selected]
+        self.library_monitor.remove_root(Path(selected))
+        if remaining:
+            self.start_monitor()
+        self.remove_folder_button.setEnabled(True)
+        self.progress_label.setText(
+            f"已移除資料夾與 {removed:,} 張專屬圖片索引；原始圖片未刪除"
+        )
+        self.refresh_monitor_status()
+        self.ocr_diagnostics.refresh()
+        self.refresh_model_status()
 
     def start_monitor(self):
         for root in self.config.roots:
@@ -1001,11 +1237,48 @@ class MainPage(QWidget):
         if status.get("error"):
             detail += f" · 錯誤：{status['error']}"
         self.monitor_status.setText(detail)
+        coverage = self.controller.repository.index_coverage()
+        self.refresh_background_index_status(coverage, status)
+        if self.developer_diagnostics is not None:
+            self.developer_diagnostics.refresh_index_overview(coverage)
+
+    def refresh_background_index_status(
+        self, coverage: dict[str, object], monitor: dict[str, object] | None = None,
+    ):
+        assets = dict(coverage.get("asset_status", {}))
+        total = int(coverage.get("total_assets", sum(int(value) for value in assets.values())))
+        ready = int(assets.get("ready", 0))
+        partial = int(assets.get("partial", 0))
+        running = int(assets.get("indexing", 0))
+        error = int(assets.get("error", 0))
+        pending_changes = int((monitor or {}).get("pending", 0))
+        active_jobs = int(self._active_index_jobs)
+        if total == 0:
+            text = "背景圖片分析：尚未建立索引。請先加入圖片資料夾。"
+            tone = "capabilityWarning"
+        elif ready == total and pending_changes == 0 and active_jobs == 0:
+            text = f"✓ 背景圖片分析已完成：{ready:,}/{total:,} 張全部完成。"
+            tone = "capabilityOk"
+        else:
+            text = (
+                f"背景圖片分析尚未完成：{ready:,}/{total:,} 張完成 · "
+                f"待補 {partial:,} · 處理中 {running:,} · 失敗 {error:,}。"
+                f" 待處理檔案異動 {pending_changes:,} · 背景掃描工作 {active_jobs:,}。"
+                " 搜尋仍可使用已完成或部分完成的索引。"
+            )
+            if self.controller.last_stop_reason:
+                text += " " + self.controller.last_stop_reason
+            tone = "capabilityWarning"
+        self.background_index_status.setObjectName(tone)
+        self.background_index_status.setText(text)
+        self.background_index_status.style().unpolish(self.background_index_status)
+        self.background_index_status.style().polish(self.background_index_status)
 
     def start_index(self, root: str, continue_rescan: bool = False):
         worker = IndexWorker(self.controller, Path(root))
+        self._active_index_jobs += 1
         worker.signals.progress.connect(self.on_progress)
-        worker.signals.failed.connect(lambda error: QMessageBox.warning(self, "無法分析圖片", error))
+        worker.signals.failed.connect(self.index_failed)
         worker.signals.finished.connect(self.index_finished)
         if continue_rescan:
             worker.signals.finished.connect(self._start_next_rescan)
@@ -1020,6 +1293,7 @@ class MainPage(QWidget):
             self.start_index(self._rescan_queue.pop(0), continue_rescan=True)
 
     def index_finished(self):
+        self._active_index_jobs = max(0, self._active_index_jobs - 1)
         if self.controller.last_stop_reason:
             self.progress_label.setText(self.controller.last_stop_reason)
             QMessageBox.warning(self, "GPU 索引已安全暫停", self.controller.last_stop_reason)
@@ -1027,12 +1301,24 @@ class MainPage(QWidget):
             self.progress_label.setText("圖片分析完成")
         self.ocr_diagnostics.refresh()
         self.refresh_model_status()
+        self.refresh_monitor_status()
+
+    @Slot(str)
+    def index_failed(self, error: str):
+        self._active_index_jobs = max(0, self._active_index_jobs - 1)
+        self.progress_label.setText("圖片分析失敗")
+        self.refresh_monitor_status()
+        QMessageBox.warning(self, "無法分析圖片", error)
 
     @Slot(int, int, str)
     def on_progress(self, current: int, total: int, name: str):
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(current)
         self.progress_label.setText(f"正在分析 {name}（{current}/{total}）")
+        self.background_index_status.setObjectName("capabilityWarning")
+        self.background_index_status.setText(
+            f"背景圖片分析進行中：目前資料夾 {current:,}/{total:,} · {name}"
+        )
 
     def toggle_pause(self):
         if self.pause.text() == "暫停":

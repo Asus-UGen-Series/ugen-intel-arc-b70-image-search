@@ -437,6 +437,60 @@ class IndexController:
                 self.region_vectors.save()
             return True
 
+    @staticmethod
+    def _inside(path: Path, root: Path) -> bool:
+        try:
+            return path.resolve().is_relative_to(root.resolve())
+        except (OSError, ValueError):
+            return False
+
+    def remove_root(self, root: Path, keep_roots: list[Path] | None = None) -> int:
+        """Stop tracking a root and remove only assets no longer covered elsewhere."""
+        root = Path(root)
+        keep_roots = [Path(item) for item in (keep_roots or [])]
+        with self._scan_lock:
+            removable: list[int] = []
+            thumbnails: list[Path] = []
+            for asset in self.repository.all_assets():
+                if asset.id is None:
+                    continue
+                asset_path = Path(asset.path)
+                if not self._inside(asset_path, root):
+                    continue
+                if any(self._inside(asset_path, kept) for kept in keep_roots):
+                    continue
+                removable.append(int(asset.id))
+                if asset.thumbnail:
+                    thumbnails.append(Path(asset.thumbnail))
+            region_ids = [
+                region_id for asset_id in removable
+                for region_id in self.repository.region_ids(asset_id)
+            ]
+            self.vectors.remove(removable)
+            if self.region_vectors is not None:
+                self.region_vectors.remove(region_ids)
+            self.repository.delete_ids(removable)
+            self.repository.remove_root(str(root))
+            retained_thumbnails = {
+                str(Path(asset.thumbnail).resolve()).casefold()
+                for asset in self.repository.all_assets() if asset.thumbnail
+            }
+            for thumbnail in thumbnails:
+                try:
+                    resolved = thumbnail.resolve()
+                    if (
+                        resolved.is_relative_to(self.thumbnails.resolve())
+                        and str(resolved).casefold() not in retained_thumbnails
+                    ):
+                        resolved.unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    LOGGER.warning("Unable to remove orphan thumbnail %s", thumbnail, exc_info=True)
+            if removable:
+                self.vectors.save()
+                if self.region_vectors is not None:
+                    self.region_vectors.save()
+            return len(removable)
+
 
 class SearchService:
     def __init__(self, repository: SQLiteAssetRepository, vectors: VectorIndex, embeddings: EmbeddingEngine,

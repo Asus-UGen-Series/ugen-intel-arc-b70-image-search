@@ -28,6 +28,10 @@ VLM 只接收使用者原句、整理出的可見條件、圖片，以及最多�
 
 圖片資料夾由 `watchdog` 即時遞迴監看，事件經防抖與檔案穩定檢查後只重跑受影響圖片；另以 15 分鐘 reconciliation scan 補回睡眠或事件溢位期間的異動。根目錄暫時離線時不會誤刪整個索引。
 
+「圖片資料夾」頁可隨時加入或移除根目錄。移除時只會停止監看並刪除該根目錄專屬的縮圖、OCR、YOLOE 與向量索引，原始圖片不會被刪除；若圖片仍被另一個保留的重疊根目錄涵蓋，索引也會保留。
+
+「搜尋結果」頁上方常駐顯示全庫背景處理狀態，包括總圖片、全部完成、待補、執行中與失敗數量。索引尚未完成時仍可搜尋已完成或部分完成的資料。
+
 ## 開發版執行
 
 ```powershell
@@ -58,7 +62,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe launcher.py --resume-index
 ```
 
-診斷輸出包含 OpenVINO runtime、實際執行裝置、SigLIP、OCR、YOLOE、VLM 的載入狀態、區域向量數、模型來源與 GPU 排程狀態。模型與效能頁另外區分 YOLOE 已推論、待處理、執行中、失敗、有框圖片、零偵測圖片與偵測框總數；「已推論」不再和「有偵測框」混為一談。
+診斷輸出包含 OpenVINO runtime、實際執行裝置、SigLIP、OCR、YOLOE、VLM 的載入狀態、逐關索引覆蓋、SQLite／USearch 實際路徑、區域向量數、模型來源與 GPU 排程狀態。模型與效能頁另外區分 YOLOE 已推論、待處理、執行中、失敗、有框圖片、零偵測圖片與偵測框總數；「已推論」不再和「有偵測框」混為一談。
 `--resume-index` 只接續 pending、error、版本過期的階段，不會清除已完成的 OCR 或 embedding。開發機也可執行 `quick-test.cmd repair`。
 
 索引模型以 `LATENCY`、單一 stream 編譯，因所有 GPU 工作已由應用程式排程器序列化；這可避免 `THROUGHPUT` 為多模型配置不會被使用的平行 stream 與額外中間記憶體。若 Intel GPU 回報 `CL_OUT_OF_RESOURCES` 或 driver event failure，排程器會熔斷並安全暫停索引，保留其餘圖片為待續跑狀態，重新啟動後即可接續。
@@ -134,6 +138,8 @@ quick-test.cmd app
 - 各通道套用 hard filter 前後的候選數、向量召回每輪擴張大小／尾端分數／cutoff／停止原因，以及每張圖的原始相似度、名次、RRF 分數與加權貢獻。
 - exact filename／OCR phrase／identifier bonus、deterministic 分數、VLM 分數、`hard_fail` 與最後分數。
 - ready／partial／error 數量，以及 embedding、region、OCR、object 各索引階段的覆蓋率。
+- 即時樹狀索引漏斗：掃描圖片 → Metadata／縮圖 → SigLIP2 全圖與局部 → PP-OCRv6 → YOLOE-26 → 全部必要關卡完成；每關分開顯示完成、實際有資料、待處理、執行中、失敗與略過數。
+- SQLite、WAL、SigLIP2 全圖／局部 USearch、縮圖、模型、設定與日誌的絕對路徑及目前檔案大小；可直接按「開啟索引資料夾」。
 - 指定一個預期檔名後，判斷它是未進動態候選聯集，還是進入候選後被 VLM 拒絕或審核尚未完成。
 
 評分公式為：

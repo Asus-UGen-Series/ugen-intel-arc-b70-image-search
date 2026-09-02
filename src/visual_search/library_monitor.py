@@ -60,6 +60,28 @@ class LibraryMonitor:
         if self._observer is not None and root.is_dir():
             self._observer.schedule(self._handler(), str(root), recursive=True)
 
+    def remove_root(self, root: Path) -> bool:
+        """Remove a watched root, restarting watchdog to drop its native watch."""
+        key = self._key(root)
+        if key not in self._roots:
+            return False
+        was_watching = self._worker is not None and self._worker.is_alive()
+        if was_watching:
+            self.stop()
+        self._roots.pop(key, None)
+        self._pending.clear()
+        while True:
+            try:
+                self._events.get_nowait()
+            except queue.Empty:
+                break
+        with self._lock:
+            self._snapshot.roots = len(self._roots)
+            self._snapshot.pending = 0
+        if was_watching and self._roots:
+            self.start()
+        return True
+
     def _handler(self):
         from watchdog.events import FileSystemEventHandler
 
@@ -115,6 +137,8 @@ class LibraryMonitor:
         worker = self._worker
         if worker is not None:
             worker.join(timeout=5)
+        self._observer = None
+        self._worker = None
         with self._lock:
             self._snapshot.watching = False
 
