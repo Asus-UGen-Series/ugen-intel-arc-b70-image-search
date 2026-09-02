@@ -20,7 +20,7 @@ from .models import (
 from .ocr_openvino import OpenVinoPaddleOcrEngine
 from .paths import AppPaths
 from .storage import SQLiteAssetRepository
-from .vectors import USearchVectorIndex
+from .vectors import USearchVectorIndex, probe_index_file
 from .gpu_scheduler import GpuScheduler
 from .vlm import LazyVlmEngine, NoopVlmEngine, VlmReranker
 from .yolo_openvino import OpenVinoYoloEngine
@@ -324,7 +324,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reset-index", action="store_true")
     parser.add_argument("--export-logs", nargs="?", const="", metavar="ZIP")
     parser.add_argument("--resume-index", action="store_true")
+    parser.add_argument(
+        "--validate-vector-index", nargs=3, metavar=("PATH", "DIMENSIONS", "DTYPE"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
+    if args.validate_vector_index:
+        path, dimensions, dtype = args.validate_vector_index
+        probe_index_file(Path(path), int(dimensions), dtype)
+        return 0
     paths = AppPaths.default()
     configure_logging(paths)
     if args.diagnose:
