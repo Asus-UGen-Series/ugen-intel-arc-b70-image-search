@@ -382,6 +382,24 @@ class VlmReranker:
         self.candidate_count = 0
         self.timeout_seconds = max(5, int(timeout_seconds))
         self.match_threshold = int(match_threshold) if int(match_threshold) in {60, 70, 85} else 70
+        self._execution_status: dict[str, object] = {
+            "state": "尚未執行",
+            "detail": "本次啟動尚未進行 VLM 圖片審核",
+            "updated_at": "",
+            "candidate_count": 0,
+            "model_reviewed": 0,
+            "cache_hits": 0,
+            "batch_count": 0,
+            "error": "",
+        }
+
+    def execution_status(self) -> dict[str, object]:
+        """Return last-search VLM activity, distinguishing inference from cache use."""
+        return dict(self._execution_status)
+
+    def _update_execution_status(self, **changes: object) -> None:
+        self._execution_status.update(changes)
+        self._execution_status["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def should_run(self, query: str, hits: Sequence[SearchHit]) -> bool:
         if self.policy == "off" or isinstance(self.engine, NoopVlmEngine) or not hits:
@@ -501,7 +519,26 @@ class VlmReranker:
                        progress=None, mode: SearchMode = SearchMode.SMART_COMPLETE) -> SearchSession:
         deterministic = list(hits)
         session = SearchSession(generation, query, mode, len(deterministic))
+        self._execution_status = {
+            "state": "正在判斷",
+            "detail": "正在判斷本次查詢是否需要 VLM",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "candidate_count": len(deterministic),
+            "model_reviewed": 0,
+            "cache_hits": 0,
+            "batch_count": 0,
+            "error": "",
+        }
         if not self.should_run(query, deterministic):
+            if self.policy == "off":
+                detail = "VLM 已由設定停用"
+            elif isinstance(self.engine, NoopVlmEngine):
+                detail = "VLM 模型尚未安裝或不可用"
+            elif not deterministic:
+                detail = "沒有候選圖片可供 VLM 審核"
+            else:
+                detail = "本次是精確文字／條件查詢，依規則不啟動 VLM"
+            self._update_execution_status(state="本次未執行", detail=detail)
             for hit in deterministic:
                 hit.rerank_source = "deterministic"
             session.results = deterministic
@@ -537,6 +574,11 @@ class VlmReranker:
                 session.qualified += 1
             else:
                 session.rejected += 1
+        self._update_execution_status(
+            state="審核中" if pending else "使用快取",
+            detail=("正在以 VLM 審核未快取候選" if pending else "所有候選均沿用本機 VLM 審核快取，模型未重新執行"),
+            cache_hits=session.cached,
+        )
         session.results = sorted(accepted, key=lambda item: item.score, reverse=True)
         self._emit(progress, session)
         batch_size = max(1, min(4, int(getattr(self.engine, "batch_size", 4))))
@@ -544,6 +586,13 @@ class VlmReranker:
             for offset in range(0, len(pending), batch_size):
                 batch = pending[offset:offset + batch_size]
                 verdicts = self._review_batch(query, target, batch, generation)
+                self._update_execution_status(
+                    state="審核中",
+                    detail="VLM 正在審核候選圖片",
+                    model_reviewed=int(self._execution_status["model_reviewed"]) + len(batch),
+                    batch_count=int(self._execution_status["batch_count"]) + 1,
+                    cache_hits=session.cached,
+                )
                 cache_rows: list[tuple[int, str, str, VlmVerdict]] = []
                 for hit, verdict in zip(batch, verdicts):
                     if hit.asset.id is not None and self.repository.get(hit.asset.id) is not None:
@@ -562,6 +611,15 @@ class VlmReranker:
             session.complete = True
             session.reranker_source = "qwen3.5"
             session.results = sorted(accepted, key=lambda item: item.score, reverse=True)
+            model_reviewed = int(self._execution_status["model_reviewed"])
+            self._update_execution_status(
+                state="已執行" if model_reviewed else "使用快取",
+                detail=(
+                    f"VLM 實際推論 {model_reviewed:,} 張候選圖片"
+                    if model_reviewed else "所有候選均沿用本機 VLM 審核快取，模型未重新執行"
+                ),
+                cache_hits=session.cached,
+            )
             self._emit(progress, session)
             return session
         except Exception as exc:
@@ -570,6 +628,12 @@ class VlmReranker:
             session.complete = False
             session.reranker_source = "qwen3.5-incomplete"
             session.results = sorted(accepted, key=lambda item: item.score, reverse=True)
+            self._update_execution_status(
+                state="執行中斷",
+                detail="VLM 審核未完成；已完成的結果仍保留",
+                cache_hits=session.cached,
+                error=str(exc),
+            )
             self._emit(progress, session)
             return session
 

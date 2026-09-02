@@ -139,7 +139,7 @@ def create_model_manager(paths: AppPaths, section: str = "model") -> ModelManage
 def diagnose(paths: AppPaths) -> int:
     config = AppConfig.load(paths.config)
     registry = create_model_registry(paths)
-    repository, controller, search = create_services(paths, config, registry)
+    repository = SQLiteAssetRepository(paths.database)
     manager = create_model_manager(paths)
     model_dir = paths.models / MODEL_DIRECTORY
     local_model_ready = all((model_dir / name).is_file() for name in (
@@ -153,7 +153,44 @@ def diagnose(paths: AppPaths) -> int:
     object_manager = registry.object_manager(config.active_object_profile)
     object_local_ready = local_object_package_ready(object_manager.root)
     vlm_manager = registry.vlm_manager(config.active_vlm_profile) if config.active_vlm_profile in registry.VLM_PROFILES else None
+    semantic_ready = manager.ready(verify_hashes=False) or local_model_ready
+    ocr_ready = ocr_manager.ready(verify_hashes=False) or local_ocr_ready
+    object_ready = object_manager.ready(verify_hashes=False) or object_local_ready
+    vlm_ready = bool(vlm_manager and vlm_manager.ready(verify_hashes=False)) or bool(config.vlm_local_path)
+
+    def latest_index(pattern: str, fallback: Path) -> Path:
+        candidates = list(paths.root.glob(pattern))
+        return max(candidates, key=lambda item: item.stat().st_mtime_ns) if candidates else fallback
+
+    full_vector_path = latest_index("vectors-*.usearch", paths.vectors)
+    region_vector_path = latest_index(
+        "regions-*.usearch", paths.vectors.with_name("regions.usearch")
+    )
+    safe_runtime = [
+        {
+            "name": "SigLIP 2 圖片／文字編碼", "backend": "OpenVINO（安全診斷不編譯模型）",
+            "requested_device": "GPU", "execution_devices": [], "loaded": False,
+            "installed": semantic_ready,
+        },
+        {
+            "name": "PP-OCRv6 文字偵測／辨識", "backend": "OpenVINO（安全診斷不編譯模型）",
+            "requested_device": "GPU", "execution_devices": [], "loaded": False,
+            "installed": ocr_ready,
+        },
+        {
+            "name": "YOLOE-26 開放物件辨識", "backend": "OpenVINO（安全診斷不編譯模型）",
+            "requested_device": "GPU", "execution_devices": [], "loaded": False,
+            "installed": object_ready,
+        },
+        {
+            "name": "Qwen3.5 最終圖片審核", "backend": "OpenVINO（安全診斷不編譯模型）",
+            "requested_device": "GPU", "execution_devices": [], "loaded": False,
+            "installed": vlm_ready,
+        },
+    ]
     report = {
+        "diagnostic_mode": "safe-no-model-compile",
+        "diagnostic_note": "實際模型裝置與最近一次 VLM 執行狀態請查看應用程式的模型與效能頁。",
         "application_data": str(paths.root),
         "database": str(paths.database),
         "indexed_images": repository.count(),
@@ -162,10 +199,8 @@ def diagnose(paths: AppPaths) -> int:
         "index_paths": {
             "database": str(paths.database),
             "database_wal": str(Path(str(paths.database) + "-wal")),
-            "full_vectors": str(getattr(controller.vectors, "path", paths.vectors)),
-            "region_vectors": str(getattr(
-                controller.region_vectors, "path", paths.vectors.with_name("regions.usearch")
-            )),
+            "full_vectors": str(full_vector_path),
+            "region_vectors": str(region_vector_path),
             "thumbnails": str(paths.thumbnails),
             "models": str(paths.models),
             "config": str(paths.config),
@@ -175,7 +210,7 @@ def diagnose(paths: AppPaths) -> int:
         "semantic_model": {
             "id": manager.model_id,
             "download_configured": manager.configured(),
-            "files_ready": manager.ready(verify_hashes=False) or local_model_ready,
+            "files_ready": semantic_ready,
             "local_development_package": local_model_ready and not manager.configured(),
             "source_repo": manager.source_repo,
             "revision": manager.revision,
@@ -183,7 +218,7 @@ def diagnose(paths: AppPaths) -> int:
         "ocr_model": {
             "id": ocr_manager.model_id,
             "download_configured": ocr_manager.configured(),
-            "files_ready": ocr_manager.ready(verify_hashes=False) or local_ocr_ready,
+            "files_ready": ocr_ready,
             "local_development_package": local_ocr_ready and not ocr_manager.configured(),
             "source_repo": ocr_manager.source_repo,
             "revision": ocr_manager.revision,
@@ -192,27 +227,24 @@ def diagnose(paths: AppPaths) -> int:
             "profile": config.active_object_profile,
             "id": object_manager.model_id,
             "download_configured": object_manager.configured(),
-            "files_ready": object_manager.ready(verify_hashes=False) or object_local_ready,
+            "files_ready": object_ready,
             "local_development_package": object_local_ready and not object_manager.configured(),
             "source_repo": object_manager.source_repo,
             "revision": object_manager.revision,
         },
         "region_index": {
-            "enabled": controller.region_vectors is not None,
+            "enabled": region_vector_path.is_file(),
             "vectors": repository.region_count(),
-            "storage": str(paths.vectors.with_name(f"regions-{search.embeddings.dimensions}.usearch")),
+            "storage": str(region_vector_path),
         },
         "vlm_model": {
             "profile": config.active_vlm_profile, "policy": config.vlm_policy,
-            "files_ready": bool(vlm_manager and vlm_manager.ready(verify_hashes=False)) or bool(config.vlm_local_path),
+            "files_ready": vlm_ready,
             "source_repo": vlm_manager.source_repo if vlm_manager else "local",
             "revision": vlm_manager.revision if vlm_manager else "",
         },
-        "gpu_scheduler": controller.scheduler.snapshot() if controller.scheduler else {},
-        "model_execution": (
-            runtime_details(controller.ocr) + runtime_details(search.embeddings)
-            + runtime_details(controller.objects) + runtime_details(search.reranker.engine)
-        ),
+        "gpu_scheduler": {"running": False, "note": "安全診斷不建立 GPU Scheduler"},
+        "model_execution": safe_runtime,
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     (paths.logs / "latest-diagnostics.json").write_text(rendered + "\n", encoding="utf-8")

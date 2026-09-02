@@ -132,7 +132,12 @@ python3 scripts/convert-yoloe26-openvino-wsl.py --scale both --install-local
 quick-test.cmd app
 ```
 
-這個入口會設定 `VISUAL_SEARCH_DEVELOPER_MODE=1`，並顯示正式版沒有的「搜尋除錯（開發者）」頁。頁面會保存最近一次查詢的本機 trace，包含：
+這個入口會設定 `VISUAL_SEARCH_DEVELOPER_MODE=1`，並顯示正式版沒有的兩個獨立頁籤：
+
+- 「每張圖片評分（開發者）」保留最近一次查詢的逐圖 trace 與 13 欄評分表。
+- 「索引漏斗（開發者）」顯示背景各關卡的即時數量與所有索引實際位置。
+
+除錯資訊包含：
 
 - 查詢類型與實際套用的 SigLIP 全圖、SigLIP 局部、OCR／檔名、YOLOE、Metadata 權重。
 - 各通道套用 hard filter 前後的候選數、向量召回每輪擴張大小／尾端分數／cutoff／停止原因，以及每張圖的原始相似度、名次、RRF 分數與加權貢獻。
@@ -141,6 +146,10 @@ quick-test.cmd app
 - 即時樹狀索引漏斗：掃描圖片 → Metadata／縮圖 → SigLIP2 全圖與局部 → PP-OCRv6 → YOLOE-26 → 全部必要關卡完成；每關分開顯示完成、實際有資料、待處理、執行中、失敗與略過數。
 - SQLite、WAL、SigLIP2 全圖／局部 USearch、縮圖、模型、設定與日誌的絕對路徑及目前檔案大小；可直接按「開啟索引資料夾」。
 - 指定一個預期檔名後，判斷它是未進動態候選聯集，還是進入候選後被 VLM 拒絕或審核尚未完成。
+
+「模型與效能」頁會顯示 VLM 最近一次狀態、候選數、實際送進模型的圖片數、快取命中、批次數、時間及實際 GPU。若精確文字查詢依規則沒有啟動 VLM，也會明確顯示「本次未執行」，不再只顯示模糊的「等待首次使用」。
+
+`quick-test.cmd diagnose` 採安全診斷：列舉 OpenVINO 裝置、檢查模型檔案、資料庫與索引，但不會在另一個行程中重新編譯所有大型 GPU 模型。模型實際執行裝置與 VLM 最近一次活動以應用程式內的「模型與效能」頁為準。
 
 評分公式為：
 

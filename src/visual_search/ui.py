@@ -596,16 +596,8 @@ class OcrDiagnosticPage(QWidget):
         self.preview.setPixmap(pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
 
-class DeveloperSearchPage(QWidget):
-    """Search recall/ranking trace. It is never exposed by a frozen production build."""
-
-    CHANNEL_LABELS = {
-        "semantic": "SigLIP 全圖",
-        "region": "SigLIP 局部",
-        "text": "OCR／檔名",
-        "object": "YOLOE 物件",
-        "metadata": "Metadata",
-    }
+class DeveloperIndexPage(QWidget):
+    """Live index-stage funnel and the exact on-disk index locations."""
 
     def __init__(self, repository, paths: AppPaths, vectors=None, region_vectors=None):
         super().__init__()
@@ -613,45 +605,23 @@ class DeveloperSearchPage(QWidget):
         self.paths = paths
         self.vectors = vectors
         self.region_vectors = region_vectors
-        self.trace: SearchDebugTrace | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 18)
         layout.setSpacing(10)
 
-        title = QLabel("搜尋召回與評分除錯")
+        title = QLabel("背景索引漏斗（即時）")
         title.setObjectName("sectionTitle")
-        warning = QLabel(
-            "開發者模式：只會由 quick-test.cmd app 啟用。正式安裝版不顯示此頁，也不保存搜尋 trace。"
-        )
-        warning.setObjectName("capabilityWarning")
-        warning.setWordWrap(True)
-        architecture = QLabel(
-            "召回層｜SigLIP 全圖找整體畫面；SigLIP 局部找小物件；OCR／檔名找精確文字；"
-            "YOLOE 提供固定開放詞彙的軟候選；Metadata 處理日期、格式與資料夾。\n"
-            "融合層｜各通道先各取候選，再以加權 RRF 合併；完整檔名、OCR 片語與程式碼識別字另加 bonus。\n"
-            "審核層｜visual／mixed 查詢會把動態候選集合全部交給 Qwen3.5；"
-            "達到所選門檻的結果全部保留，最後為 70% VLM + 30% deterministic。"
-        )
-        architecture.setWordWrap(True)
-        architecture.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(title)
-        layout.addWidget(warning)
-        layout.addWidget(architecture)
-
-        index_title = QLabel("背景索引漏斗（即時）")
-        index_title.setObjectName("sectionTitle")
-        index_help = QLabel(
+        help_text = QLabel(
             "每一關的『完成』代表模型真正跑過；『實際有資料』可區分 OCR／YOLOE 跑完但沒有文字或物件的圖片。"
         )
-        index_help.setObjectName("muted")
-        index_help.setWordWrap(True)
+        help_text.setObjectName("muted")
+        help_text.setWordWrap(True)
         self.index_tree = QTreeWidget()
         self.index_tree.setColumnCount(7)
         self.index_tree.setHeaderLabels([
             "處理關卡", "完成", "實際有資料", "待處理", "執行中", "失敗", "補充",
         ])
         self.index_tree.setAlternatingRowColors(True)
-        self.index_tree.setMinimumHeight(245)
         tree_header = self.index_tree.header()
         tree_header.setSectionResizeMode(0, QHeaderView.Stretch)
         for column in range(1, 6):
@@ -661,66 +631,21 @@ class DeveloperSearchPage(QWidget):
         self.index_locations.setObjectName("locationBox")
         self.index_locations.setWordWrap(True)
         self.index_locations.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        index_buttons = QHBoxLayout()
-        refresh_index = QPushButton("重新整理索引漏斗")
-        refresh_index.clicked.connect(self.refresh_index_overview)
+        buttons = QHBoxLayout()
+        refresh = QPushButton("重新整理索引漏斗")
+        refresh.clicked.connect(self.refresh_index_overview)
         open_index = QPushButton("開啟索引資料夾")
         open_index.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.root)))
         )
-        index_buttons.addWidget(refresh_index)
-        index_buttons.addWidget(open_index)
-        index_buttons.addStretch()
-        layout.addWidget(index_title)
-        layout.addWidget(index_help)
-        layout.addWidget(self.index_tree)
+        buttons.addWidget(refresh)
+        buttons.addWidget(open_index)
+        buttons.addStretch()
+        layout.addWidget(title)
+        layout.addWidget(help_text)
+        layout.addWidget(self.index_tree, 1)
         layout.addWidget(self.index_locations)
-        layout.addLayout(index_buttons)
-
-        self.query_summary = QLabel("完成一次搜尋後，這裡會顯示該次完整 trace。")
-        self.query_summary.setWordWrap(True)
-        self.query_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.candidate_summary = QLabel()
-        self.candidate_summary.setWordWrap(True)
-        self.candidate_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.coverage_summary = QLabel()
-        self.coverage_summary.setWordWrap(True)
-        self.coverage_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.diagnosis = QLabel()
-        self.diagnosis.setObjectName("capabilityWarning")
-        self.diagnosis.setWordWrap(True)
-        for widget in (self.query_summary, self.candidate_summary, self.coverage_summary, self.diagnosis):
-            layout.addWidget(widget)
-
-        expected_row = QHBoxLayout()
-        self.expected = QLineEdit()
-        self.expected.setPlaceholderText("可選：輸入預期應找到的檔名或完整路徑，檢查它在哪一層消失")
-        inspect_button = QPushButton("檢查指定圖片")
-        inspect_button.clicked.connect(self.inspect_expected)
-        expected_row.addWidget(self.expected, 1)
-        expected_row.addWidget(inspect_button)
-        layout.addLayout(expected_row)
-        self.expected_result = QLabel()
-        self.expected_result.setWordWrap(True)
-        self.expected_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.expected_result)
-
-        self.table = QTableWidget(0, 13)
-        self.table.setHorizontalHeaderLabels([
-            "Det.#", "檔名", "去向", "最後分數", "Det.分數", "VLM", "Bonus",
-            "SigLIP 全圖", "SigLIP 局部", "OCR／檔名", "YOLOE", "Metadata", "命中原因",
-        ])
-        header = self.table.horizontalHeader()
-        for column in (0, 2, 3, 4, 5, 6):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        for column in range(7, 12):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(12, QHeaderView.Stretch)
-        self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(True)
-        self.table.verticalHeader().setDefaultSectionSize(64)
-        layout.addWidget(self.table, 1)
+        layout.addLayout(buttons)
         self.refresh_index_overview()
 
     @staticmethod
@@ -816,6 +741,91 @@ class DeveloperSearchPage(QWidget):
         self.index_locations.setText("索引實際位置\n" + "\n".join(
             f"{name}：{path}（{self._path_status(path)}）" for name, path in locations
         ))
+
+
+class DeveloperSearchPage(QWidget):
+    """Search recall/ranking trace. It is never exposed by a frozen production build."""
+
+    CHANNEL_LABELS = {
+        "semantic": "SigLIP 全圖",
+        "region": "SigLIP 局部",
+        "text": "OCR／檔名",
+        "object": "YOLOE 物件",
+        "metadata": "Metadata",
+    }
+
+    def __init__(self, repository):
+        super().__init__()
+        self.repository = repository
+        self.trace: SearchDebugTrace | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("搜尋召回與評分除錯")
+        title.setObjectName("sectionTitle")
+        warning = QLabel(
+            "開發者模式：只會由 quick-test.cmd app 啟用。正式安裝版不顯示此頁，也不保存搜尋 trace。"
+        )
+        warning.setObjectName("capabilityWarning")
+        warning.setWordWrap(True)
+        architecture = QLabel(
+            "召回層｜SigLIP 全圖找整體畫面；SigLIP 局部找小物件；OCR／檔名找精確文字；"
+            "YOLOE 提供固定開放詞彙的軟候選；Metadata 處理日期、格式與資料夾。\n"
+            "融合層｜各通道先各取候選，再以加權 RRF 合併；完整檔名、OCR 片語與程式碼識別字另加 bonus。\n"
+            "審核層｜visual／mixed 查詢會把動態候選集合全部交給 Qwen3.5；"
+            "達到所選門檻的結果全部保留，最後為 70% VLM + 30% deterministic。"
+        )
+        architecture.setWordWrap(True)
+        architecture.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(title)
+        layout.addWidget(warning)
+        layout.addWidget(architecture)
+
+        self.query_summary = QLabel("完成一次搜尋後，這裡會顯示該次完整 trace。")
+        self.query_summary.setWordWrap(True)
+        self.query_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.candidate_summary = QLabel()
+        self.candidate_summary.setWordWrap(True)
+        self.candidate_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.coverage_summary = QLabel()
+        self.coverage_summary.setWordWrap(True)
+        self.coverage_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.diagnosis = QLabel()
+        self.diagnosis.setObjectName("capabilityWarning")
+        self.diagnosis.setWordWrap(True)
+        for widget in (self.query_summary, self.candidate_summary, self.coverage_summary, self.diagnosis):
+            layout.addWidget(widget)
+
+        expected_row = QHBoxLayout()
+        self.expected = QLineEdit()
+        self.expected.setPlaceholderText("可選：輸入預期應找到的檔名或完整路徑，檢查它在哪一層消失")
+        inspect_button = QPushButton("檢查指定圖片")
+        inspect_button.clicked.connect(self.inspect_expected)
+        expected_row.addWidget(self.expected, 1)
+        expected_row.addWidget(inspect_button)
+        layout.addLayout(expected_row)
+        self.expected_result = QLabel()
+        self.expected_result.setWordWrap(True)
+        self.expected_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.expected_result)
+
+        self.table = QTableWidget(0, 13)
+        self.table.setHorizontalHeaderLabels([
+            "Det.#", "檔名", "去向", "最後分數", "Det.分數", "VLM", "Bonus",
+            "SigLIP 全圖", "SigLIP 局部", "OCR／檔名", "YOLOE", "Metadata", "命中原因",
+        ])
+        header = self.table.horizontalHeader()
+        for column in (0, 2, 3, 4, 5, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        for column in range(7, 12):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(12, QHeaderView.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setDefaultSectionSize(64)
+        layout.addWidget(self.table, 1)
 
     @staticmethod
     def _mapping_text(values: dict[str, object]) -> str:
@@ -1017,6 +1027,8 @@ class MainPage(QWidget):
         )
         self.developer_diagnostics = None
         self.developer_tab_index = -1
+        self.developer_index_page = None
+        self.developer_index_tab_index = -1
         if self.developer_mode:
             self.search_service.set_debug_enabled(True)
         self.search_generation = 0
@@ -1024,6 +1036,7 @@ class MainPage(QWidget):
         self.pool = QThreadPool.globalInstance()
         self._rescan_queue: list[str] = []
         self._active_index_jobs = 0
+        self._progress_operation: str | None = None
         self.library_monitor = LibraryMonitor(controller, config.roots)
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -1111,6 +1124,7 @@ class MainPage(QWidget):
         rescan.clicked.connect(self.rescan_all)
         controls.addWidget(rescan)
         self.progress = QProgressBar()
+        self.progress.setVisible(False)
         self.progress_label = QLabel("尚未建立索引")
         self.monitor_status = QLabel("異動監看尚未啟動")
         self.monitor_status.setObjectName("muted")
@@ -1131,14 +1145,21 @@ class MainPage(QWidget):
         self.models_scroll.setObjectName("modelsScroll")
         self.models_scroll.setFrameShape(QFrame.NoFrame)
         self.models_scroll.setWidgetResizable(True)
+        self.models_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.models_scroll.setWidget(self.models_page)
         self.tabs.addTab(self.models_scroll, "模型與效能")
         if self.developer_mode:
-            self.developer_diagnostics = DeveloperSearchPage(
+            self.developer_diagnostics = DeveloperSearchPage(self.controller.repository)
+            self.developer_tab_index = self.tabs.addTab(
+                self.developer_diagnostics, "每張圖片評分（開發者）"
+            )
+            self.developer_index_page = DeveloperIndexPage(
                 self.controller.repository, self.paths, self.controller.vectors,
                 self.controller.region_vectors,
             )
-            self.developer_tab_index = self.tabs.addTab(self.developer_diagnostics, "搜尋除錯（開發者）")
+            self.developer_index_tab_index = self.tabs.addTab(
+                self.developer_index_page, "索引漏斗（開發者）"
+            )
         self.refresh_model_status()
         layout.addWidget(self.tabs)
         self.monitor_timer = QTimer(self)
@@ -1179,7 +1200,7 @@ class MainPage(QWidget):
         self.stop_monitor()
         self.controller.cancel()
         self.remove_folder_button.setEnabled(False)
-        self.progress_label.setText(f"正在移除索引：{selected}")
+        self._show_busy_progress(f"正在移除索引：{selected}", "remove")
         worker = RootRemovalWorker(
             self.controller, Path(selected), [Path(root) for root in remaining],
         )
@@ -1194,6 +1215,7 @@ class MainPage(QWidget):
 
     def folder_remove_failed(self, selected: str, error: str):
         self.remove_folder_button.setEnabled(True)
+        self._hide_progress("remove")
         self.progress_label.setText("資料夾移除失敗")
         self.library_monitor.add_root(Path(selected))
         self.start_monitor()
@@ -1209,6 +1231,7 @@ class MainPage(QWidget):
         if remaining:
             self.start_monitor()
         self.remove_folder_button.setEnabled(True)
+        self._hide_progress("remove")
         self.progress_label.setText(
             f"已移除資料夾與 {removed:,} 張專屬圖片索引；原始圖片未刪除"
         )
@@ -1239,8 +1262,8 @@ class MainPage(QWidget):
         self.monitor_status.setText(detail)
         coverage = self.controller.repository.index_coverage()
         self.refresh_background_index_status(coverage, status)
-        if self.developer_diagnostics is not None:
-            self.developer_diagnostics.refresh_index_overview(coverage)
+        if self.developer_index_page is not None:
+            self.developer_index_page.refresh_index_overview(coverage)
 
     def refresh_background_index_status(
         self, coverage: dict[str, object], monitor: dict[str, object] | None = None,
@@ -1277,6 +1300,8 @@ class MainPage(QWidget):
     def start_index(self, root: str, continue_rescan: bool = False):
         worker = IndexWorker(self.controller, Path(root))
         self._active_index_jobs += 1
+        if self._progress_operation != "remove":
+            self._show_busy_progress("正在準備圖片分析…", "index")
         worker.signals.progress.connect(self.on_progress)
         worker.signals.failed.connect(self.index_failed)
         worker.signals.finished.connect(self.index_finished)
@@ -1294,6 +1319,8 @@ class MainPage(QWidget):
 
     def index_finished(self):
         self._active_index_jobs = max(0, self._active_index_jobs - 1)
+        if self._active_index_jobs == 0:
+            self._hide_progress("index")
         if self.controller.last_stop_reason:
             self.progress_label.setText(self.controller.last_stop_reason)
             QMessageBox.warning(self, "GPU 索引已安全暫停", self.controller.last_stop_reason)
@@ -1306,19 +1333,40 @@ class MainPage(QWidget):
     @Slot(str)
     def index_failed(self, error: str):
         self._active_index_jobs = max(0, self._active_index_jobs - 1)
+        if self._active_index_jobs == 0:
+            self._hide_progress("index")
         self.progress_label.setText("圖片分析失敗")
         self.refresh_monitor_status()
         QMessageBox.warning(self, "無法分析圖片", error)
 
     @Slot(int, int, str)
     def on_progress(self, current: int, total: int, name: str):
-        self.progress.setMaximum(max(total, 1))
+        if self._progress_operation == "remove":
+            return
+        self._progress_operation = "index"
+        self.progress.setVisible(True)
+        self.progress.setRange(0, max(total, 1))
         self.progress.setValue(current)
         self.progress_label.setText(f"正在分析 {name}（{current}/{total}）")
         self.background_index_status.setObjectName("capabilityWarning")
         self.background_index_status.setText(
             f"背景圖片分析進行中：目前資料夾 {current:,}/{total:,} · {name}"
         )
+
+    def _show_busy_progress(self, text: str, operation: str) -> None:
+        """Show activity without inventing a percentage for work with no granular total."""
+        self._progress_operation = operation
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self.progress_label.setText(text)
+
+    def _hide_progress(self, operation: str) -> None:
+        if self._progress_operation != operation:
+            return
+        self.progress.setVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self._progress_operation = None
 
     def toggle_pause(self):
         if self.pause.text() == "暫停":
@@ -1405,7 +1453,8 @@ class MainPage(QWidget):
             )
         if self.developer_diagnostics is not None:
             self.developer_diagnostics.show_trace(self.search_service.debug_trace(generation))
-            self.tabs.setTabText(self.developer_tab_index, "搜尋除錯（有新資料）")
+            self.tabs.setTabText(self.developer_tab_index, "每張圖片評分（有新資料）")
+        self.refresh_model_status()
 
     @Slot(int, str)
     def on_search_failed(self, generation: int, error: str):
@@ -1415,6 +1464,7 @@ class MainPage(QWidget):
         self.search_status.setText("搜尋發生錯誤，請到模型與效能頁查看狀態。")
         if self.developer_diagnostics is not None:
             self.developer_diagnostics.query_summary.setText(f"搜尋在建立完整 trace 前失敗：{error}")
+        self.refresh_model_status()
 
     @Slot(QModelIndex)
     def open_result(self, index: QModelIndex):
@@ -1452,6 +1502,18 @@ class MainPage(QWidget):
         explanation.setWordWrap(True)
         self.models_layout.addWidget(title)
         self.models_layout.addWidget(explanation)
+
+        top_buttons = QHBoxLayout()
+        refresh = QPushButton("重新檢查狀態")
+        refresh.clicked.connect(self.refresh_model_status)
+        open_folder = QPushButton("開啟模型資料夾")
+        open_folder.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.models)))
+        )
+        top_buttons.addWidget(refresh)
+        top_buttons.addWidget(open_folder)
+        top_buttons.addStretch()
+        self.models_layout.addLayout(top_buttons)
 
         object_settings = QHBoxLayout()
         object_label = QLabel("物件模型")
@@ -1582,12 +1644,39 @@ class MainPage(QWidget):
 
         vlm_runtime = getattr(self.search_service.reranker.engine, "runtime_details", lambda: [])() if self.search_service.reranker else []
         vlm_installed = bool(vlm_runtime and (vlm_runtime[0].get("installed") or vlm_runtime[0].get("loaded")))
+        vlm_loaded = any(bool(item.get("loaded")) for item in vlm_runtime)
         vlm_devices = sorted({device for item in vlm_runtime for device in item.get("execution_devices", [])})
+        vlm_activity = (
+            self.search_service.reranker.execution_status()
+            if self.search_service.reranker and callable(getattr(self.search_service.reranker, "execution_status", None))
+            else {"state": "尚未執行", "detail": "沒有 VLM 執行紀錄"}
+        )
+        if self.config.vlm_policy == "off":
+            vlm_state, vlm_tone = "已停用", "warning"
+        elif vlm_loaded:
+            vlm_state, vlm_tone = "Qwen3.5 已載入", "ok"
+        elif vlm_installed:
+            vlm_state, vlm_tone = "Qwen3.5 已安裝，尚未載入", "neutral"
+        else:
+            vlm_state, vlm_tone = "尚未安裝", "warning"
+        activity_detail = (
+            f"最近一次：{vlm_activity.get('state', '尚未執行')} · "
+            f"候選 {int(vlm_activity.get('candidate_count', 0)):,} · "
+            f"模型實際推論 {int(vlm_activity.get('model_reviewed', 0)):,} · "
+            f"快取 {int(vlm_activity.get('cache_hits', 0)):,} · "
+            f"批次 {int(vlm_activity.get('batch_count', 0)):,}"
+        )
+        if vlm_activity.get("updated_at"):
+            activity_detail += f" · {vlm_activity['updated_at']}"
+        activity_detail += "\n" + str(vlm_activity.get("detail", ""))
+        if vlm_activity.get("error"):
+            activity_detail += "\n錯誤：" + str(vlm_activity["error"])
         cards.addWidget(StatusCard(
             "最終圖片審核",
-            "Qwen3.5 已安裝" if vlm_installed else ("已停用" if self.config.vlm_policy == "off" else "尚未安裝"),
-            f"模式：{self.config.vlm_policy} · 實際裝置：{', '.join(vlm_devices) or '等待首次使用'}",
-            "ok" if vlm_installed else "warning",
+            vlm_state,
+            f"模式：{self.config.vlm_policy} · 實際裝置：{', '.join(vlm_devices) or '尚未建立推論工作'}\n"
+            + activity_detail,
+            vlm_tone,
         ), 2, 1)
 
         indexed = self.controller.repository.count()
@@ -1608,7 +1697,7 @@ class MainPage(QWidget):
         runtime_grid.setColumnStretch(0, 1)
         runtime_grid.setColumnStretch(1, 1)
         semantic_runtime = getattr(self.search_service.embeddings, "runtime_details", lambda: [])()
-        for index, item in enumerate(ocr_runtime + semantic_runtime + object_runtime + vlm_runtime):
+        for index, item in enumerate(vlm_runtime + object_runtime + semantic_runtime + ocr_runtime):
             devices = [str(device) for device in item.get("execution_devices", [])]
             on_gpu = any(device.startswith("GPU") for device in devices)
             loaded = bool(item.get("loaded"))
@@ -1646,16 +1735,6 @@ class MainPage(QWidget):
             legacy_notice.setObjectName("muted")
             legacy_notice.setWordWrap(True)
             self.models_layout.addWidget(legacy_notice)
-
-        buttons = QHBoxLayout()
-        refresh = QPushButton("重新檢查狀態")
-        refresh.clicked.connect(self.refresh_model_status)
-        open_folder = QPushButton("開啟模型資料夾")
-        open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.models))))
-        buttons.addWidget(refresh)
-        buttons.addWidget(open_folder)
-        buttons.addStretch()
-        self.models_layout.addLayout(buttons)
 
         if semantic_ready:
             self.capability_banner.setObjectName("capabilityOk")
