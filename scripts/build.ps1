@@ -11,7 +11,14 @@ if (-not $SkipTests -and (Test-Path -LiteralPath 'tests')) {
     & $Python -m pytest
     if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE." }
 } elseif (-not $SkipTests) {
-    Write-Warning 'Local tests are not present in this public checkout; run the release verification suite before publishing.'
+    throw 'Public tests folder is missing.'
+}
+if ($GithubRepository) {
+    & $Python scripts\check-release-models.py
+    if ($LASTEXITCODE -ne 0) { throw "Release model validation failed with exit code $LASTEXITCODE." }
+} else {
+    & $Python scripts\check-release-models.py --allow-incomplete
+    if ($LASTEXITCODE -ne 0) { throw "Model manifest validation failed with exit code $LASTEXITCODE." }
 }
 & $Python scripts\generate-sbom.py --output dist\sbom.json
 if ($LASTEXITCODE -ne 0) { throw "SBOM generation failed with exit code $LASTEXITCODE." }
@@ -30,7 +37,7 @@ if (-not $Iscc) { throw 'Inno Setup 6 was not found.' }
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 $Hash = (Get-FileHash -LiteralPath 'dist\VisualSearch-Setup.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath 'dist\VisualSearch-Setup.exe.sha256' -Encoding ascii -Value "$Hash  VisualSearch-Setup.exe"
-$InstallScript = (Get-Content -LiteralPath 'install.ps1' -Raw).Replace('REPLACE_WITH_RELEASE_SHA256', $Hash)
+$InstallScript = (Get-Content -LiteralPath 'install.ps1' -Raw -Encoding utf8).Replace('REPLACE_WITH_RELEASE_SHA256', $Hash)
 if ($GithubRepository) {
     if ($GithubRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
         throw 'GithubRepository must use owner/repository format.'

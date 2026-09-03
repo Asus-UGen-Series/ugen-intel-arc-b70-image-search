@@ -318,12 +318,125 @@ def resume_index(paths: AppPaths) -> int:
             controller.scheduler.shutdown()
 
 
+def evaluate_accuracy(paths: AppPaths, args) -> int:
+    """Run a prompt-labelled benchmark without driving the Qt user interface."""
+    from .domain import SearchMode
+    from .evaluation import (
+        aggregate_results, benchmark_metadata, build_queries, indexed_dataset_paths,
+        load_benchmark_images, run_benchmark, write_reports,
+    )
+
+    image_folder = Path(args.evaluate_accuracy).expanduser().resolve()
+    try:
+        images = load_benchmark_images(image_folder)
+    except ValueError as exc:
+        cli_output(str(exc))
+        return 2
+
+    repository = SQLiteAssetRepository(paths.database)
+    try:
+        indexed_count, missing = indexed_dataset_paths(
+            images,
+            (asset.path for asset in repository.all_assets() if asset.status in ("ready", "partial")),
+        )
+    finally:
+        repository.close()
+    if missing:
+        cli_output(
+            f"評測資料尚未完整建立索引：{indexed_count}/{len(images)}。"
+            "請先在 Visual Search 加入資料夾並等待背景分析完成。"
+        )
+        for name in missing[:10]:
+            cli_output(f"  缺少：{name}")
+        return 2
+
+    languages = ("en", "zh") if args.evaluation_language == "both" else (args.evaluation_language,)
+    suite = "objective"
+    if args.evaluation_suite != suite:
+        cli_output(
+            f"評測套件 {args.evaluation_suite!r} 是相容別名；"
+            "已改用只包含主體、同義詞與場景的 objective 題庫。"
+        )
+    queries = build_queries(images, suite, languages)
+    if args.evaluation_max_queries is not None:
+        queries = queries[:max(1, int(args.evaluation_max_queries))]
+    top_k = max(1, min(int(args.evaluation_top_k), 100))
+    config = AppConfig.load(paths.config)
+    if args.evaluation_threshold is not None:
+        config.vlm_match_threshold = int(args.evaluation_threshold)
+    mode = SearchMode(args.evaluation_mode or config.search_mode)
+    output_root = (
+        Path(args.evaluation_output)
+        if args.evaluation_output
+        else Path.cwd() / "artifacts" / "evaluation-reports"
+    )
+
+    cli_output(
+        f"開始自動評測：{len(images)} 張圖片、{len(queries)} 個查詢、Top {top_k}、"
+        f"{mode.value}、門檻 {config.vlm_match_threshold}。"
+    )
+    registry = create_model_registry(paths)
+    _repository, controller, search = create_services(paths, config, registry)
+
+    def progress(current: int, total: int, row: dict[str, object]) -> None:
+        if row["error"]:
+            cli_output(f"[{current}/{total}] {row['query']} | 失敗：{row['error']}")
+            return
+        cli_output(
+            f"[{current}/{total}] {row['query']} | "
+            f"正確 {row['correct_total']}/{row['returned_total']} | "
+            f"Precision {float(row['precision_returned']):.1%} | "
+            f"Recall@{top_k} {float(row['recall_at_k']):.1%} | "
+            f"{float(row['latency_seconds']):.1f}s"
+        )
+
+    try:
+        rows, details = run_benchmark(search, queries, images, top_k, mode, progress)
+        metadata = benchmark_metadata(
+            image_folder=image_folder,
+            suite=suite,
+            languages=languages,
+            mode=mode,
+            threshold=config.vlm_match_threshold,
+            top_k=top_k,
+            image_count=len(images),
+        )
+        reports = write_reports(output_root, rows, details, metadata)
+        overall = aggregate_results(rows)["overall"]
+        cli_output("")
+        cli_output("自動評測完成")
+        cli_output(f"  Precision：{float(overall['precision_macro']):.1%}")
+        cli_output(f"  Recall@{top_k}：{float(overall['recall_macro']):.1%}")
+        cli_output(f"  Hit@1：{float(overall['hit_at_1']):.1%}")
+        cli_output(f"  MRR：{float(overall['mrr_at_k']):.1%}")
+        cli_output(f"  報告：{reports['html']}")
+        cli_output(f"  CSV：{reports['queries_csv']}")
+        if args.open_report and os.name == "nt":
+            os.startfile(reports["html"])
+        return 3 if int(overall["failed_queries"]) else 0
+    finally:
+        if controller.scheduler is not None:
+            controller.scheduler.shutdown()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--diagnose", action="store_true")
     parser.add_argument("--reset-index", action="store_true")
     parser.add_argument("--export-logs", nargs="?", const="", metavar="ZIP")
     parser.add_argument("--resume-index", action="store_true")
+    parser.add_argument("--evaluate-accuracy", metavar="IMAGE_DIR")
+    parser.add_argument(
+        "--evaluation-suite", choices=("objective", "core", "full"), default="objective",
+        help="客觀評測；core/full 僅為舊版相容別名",
+    )
+    parser.add_argument("--evaluation-language", choices=("en", "zh", "mixed", "both"), default="en")
+    parser.add_argument("--evaluation-top-k", type=int, default=10)
+    parser.add_argument("--evaluation-mode", choices=("smart_complete", "exhaustive"))
+    parser.add_argument("--evaluation-threshold", type=int, choices=(60, 70, 85))
+    parser.add_argument("--evaluation-output", metavar="DIR")
+    parser.add_argument("--evaluation-max-queries", type=int, metavar="N")
+    parser.add_argument("--open-report", action="store_true")
     parser.add_argument(
         "--validate-vector-index", nargs=3, metavar=("PATH", "DIMENSIONS", "DTYPE"),
         help=argparse.SUPPRESS,
@@ -343,6 +456,8 @@ def main(argv: list[str] | None = None) -> int:
         return export_logs(paths, Path(args.export_logs) if args.export_logs else None)
     if args.resume_index:
         return resume_index(paths)
+    if args.evaluate_accuracy:
+        return evaluate_accuracy(paths, args)
     from PySide6.QtWidgets import QApplication
     from .ui import MainWindow, ModelSetupDialog, VlmChoiceDialog
     app = QApplication(sys.argv)

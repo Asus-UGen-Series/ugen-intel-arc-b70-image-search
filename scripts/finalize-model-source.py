@@ -20,6 +20,13 @@ REQUIRED = {
     "ocr_model": {"det_model.xml", "det_model.bin", "rec_model.xml", "rec_model.bin", "rec_inference.yml"},
 }
 
+REPO_PATHS = {
+    "model": "siglip2-so400m-patch16-naflex-openvino-fp16",
+    "ocr_model": "pp-ocrv6-medium-openvino-fp16",
+    "yoloe_s": "yoloe-26s-pf-openvino-fp16",
+    "yoloe_m": "yoloe-26m-pf-openvino-fp16",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -30,17 +37,29 @@ def main() -> None:
     api = HfApi()
     info = api.model_info(args.repo, revision="main", files_metadata=True)
     names = {item.rfilename for item in info.siblings}
-    missing = REQUIRED[args.section] - names
+    prefix = ""
+    if not REQUIRED[args.section] <= names and args.section in REPO_PATHS:
+        candidate = REPO_PATHS[args.section] + "/"
+        prefixed_names = {
+            name[len(candidate):] for name in names if name.startswith(candidate)
+        }
+        if REQUIRED[args.section] <= prefixed_names:
+            prefix = candidate
+    local_names = {name[len(prefix):] for name in names if not prefix or name.startswith(prefix)}
+    missing = REQUIRED[args.section] - local_names
     if args.section.startswith("yoloe_"):
-        if not any(name.endswith(".xml") for name in names):
+        if not any(name.endswith(".xml") for name in local_names):
             missing.add("<OpenVINO .xml>")
-        if not any(name.endswith(".bin") for name in names):
+        if not any(name.endswith(".bin") for name in local_names):
             missing.add("<OpenVINO .bin>")
     if missing:
         raise SystemExit("遠端模型不完整：" + ", ".join(sorted(missing)))
     files = []
     for item in info.siblings:
-        if item.rfilename in {".gitattributes", "README.md"}:
+        if prefix and not item.rfilename.startswith(prefix):
+            continue
+        name = item.rfilename[len(prefix):] if prefix else item.rfilename
+        if name in {".gitattributes", "README.md"}:
             continue
         lfs = getattr(item, "lfs", None)
         digest = getattr(lfs, "sha256", None)
@@ -49,7 +68,8 @@ def main() -> None:
             response.raise_for_status()
             digest = hashlib.sha256(response.content).hexdigest()
         files.append({
-            "name": item.rfilename,
+            "name": name,
+            "source_name": item.rfilename,
             "url": f"https://huggingface.co/{args.repo}/resolve/{info.sha}/{quote(item.rfilename)}?download=true",
             "sha256": digest, "size": item.size,
         })

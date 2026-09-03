@@ -298,7 +298,10 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scale", choices=("s", "m", "both"), default="both")
-    parser.add_argument("--output", type=Path, default=project_root / "artifacts" / "hf")
+    parser.add_argument(
+        "--output", type=Path,
+        default=project_root / "release-models" / "visual-search-openvino-models",
+    )
     parser.add_argument("--keep-onnx", action="store_true")
     parser.add_argument("--install-local", action="store_true")
     parser.add_argument("--force", action="store_true")

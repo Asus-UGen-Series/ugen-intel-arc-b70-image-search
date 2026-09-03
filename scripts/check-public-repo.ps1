@@ -15,7 +15,7 @@ $Files = if ($Staged) {
 if ($LASTEXITCODE -ne 0) { throw 'Unable to enumerate public files with Git.' }
 $Files = @($Files | Where-Object { $_ })
 $Errors = [System.Collections.Generic.List[string]]::new()
-$Forbidden = '^(tests/|quick-test\.cmd$|\.verification/|\.test-tmp|\.venv/|build/|dist/|release-models/|artifacts/)'
+$Forbidden = '^(\.verification/|\.test-tmp|\.venv/|build/|dist/|release-models/|artifacts/|accuracy-reports/)'
 $SensitiveName = '(?i)(^|/)(\.env($|\.)|.*\.(pem|key|pfx|p12|snk|cer|crt|sig)$)'
 $MaxBytes = 50MB
 

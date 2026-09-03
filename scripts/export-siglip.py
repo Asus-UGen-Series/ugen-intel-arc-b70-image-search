@@ -21,7 +21,10 @@ from transformers import AutoModel, AutoProcessor
 
 UPSTREAM = "google/siglip2-so400m-patch16-naflex"
 UPSTREAM_REVISION = "cc24074f717b612951c2dead130904ab9b65a81e"
-DEFAULT_OUTPUT = Path("release-models/siglip2-so400m-patch16-naflex-openvino-fp16")
+DEFAULT_OUTPUT = Path(
+    "release-models/visual-search-openvino-models/"
+    "siglip2-so400m-patch16-naflex-openvino-fp16"
+)
 MAX_PATCHES = 256
 
 

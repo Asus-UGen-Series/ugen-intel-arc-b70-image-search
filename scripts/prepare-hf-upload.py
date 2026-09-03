@@ -1,4 +1,4 @@
-"""Validate a local OpenVINO package and prepare a reproducible HF upload plan."""
+"""Validate local OpenVINO packages and write a reproducible HF upload manifest."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +8,12 @@ from pathlib import Path
 
 
 IGNORED_PARTS = {"compiled_cache", "__pycache__", ".git"}
+BUNDLE_IDS = (
+    "siglip2-so400m-patch16-naflex-openvino-fp16",
+    "pp-ocrv6-medium-openvino-fp16",
+    "yoloe-26s-pf-openvino-fp16",
+    "yoloe-26m-pf-openvino-fp16",
+)
 
 
 def sha256(path: Path) -> str:
@@ -45,32 +51,51 @@ def validate_folder(folder: Path) -> str:
     raise ValueError("無法辨識或模型包缺少必要 OpenVINO IR")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--folder", type=Path, required=True)
-    parser.add_argument("--repo", help="預計上傳的 Hugging Face repo，例如 owner/model")
-    args = parser.parse_args()
-    folder = args.folder.resolve()
-    kind = validate_folder(folder)
-    files = []
+def model_files(folder: Path, root: Path) -> list[dict[str, object]]:
+    files: list[dict[str, object]] = []
     for path in sorted(item for item in folder.rglob("*") if item.is_file()):
-        relative = path.relative_to(folder)
+        relative = path.relative_to(root)
         if any(part in IGNORED_PARTS for part in relative.parts):
             continue
-        if path.name == "upload-manifest.json":
+        if path.name in {"upload-manifest.json"}:
             continue
         files.append({
             "name": relative.as_posix(),
             "size": path.stat().st_size,
             "sha256": sha256(path),
         })
+    return files
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--folder", type=Path, required=True)
+    parser.add_argument("--repo", help="預計上傳的 Hugging Face repo，例如 owner/visual-search-openvino-models")
+    args = parser.parse_args()
+    folder = args.folder.resolve()
+
+    bundle_folders = [folder / model_id for model_id in BUNDLE_IDS]
+    is_bundle = any(path.exists() for path in bundle_folders)
+    if is_bundle:
+        missing = [path.name for path in bundle_folders if not path.is_dir()]
+        if missing:
+            raise ValueError("整合模型庫缺少資料夾：" + ", ".join(missing))
+        kinds = {path.name: validate_folder(path) for path in bundle_folders}
+        files = model_files(folder, folder)
+        kind: object = "visual-search-openvino-bundle"
+    else:
+        kinds = {}
+        kind = validate_folder(folder)
+        files = model_files(folder, folder)
+
     if not files:
         raise ValueError("模型包沒有可上傳檔案")
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": kind,
+        "models": kinds,
         "repo": args.repo or "",
-        "total_size": sum(item["size"] for item in files),
+        "total_size": sum(int(item["size"]) for item in files),
         "files": files,
     }
     output = folder / "upload-manifest.json"
@@ -78,8 +103,7 @@ def main() -> None:
     print(f"Validated {kind}: {len(files)} files, {payload['total_size'] / 1e9:.2f} GB")
     print(f"Upload manifest: {output}")
     if args.repo:
-        print(f"Upload command: hf upload {args.repo} \"{folder}\" . --repo-type model")
-        print("After upload: python scripts/finalize-model-source.py --section <section> --repo " + args.repo)
+        print(f"Publish command: python scripts/publish-model.py --bundle --repo {args.repo}")
 
 
 if __name__ == "__main__":

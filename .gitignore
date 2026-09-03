@@ -7,15 +7,12 @@ __pycache__/
 .test-tmp*/
 .verification/
 
-# Local-only tests requested for this repository
-tests/
-quick-test.cmd
-
 # Build and release output
 build/
 dist/
 release-models/
 artifacts/
+accuracy-reports/
 *.exe
 *.msi
 *.zip

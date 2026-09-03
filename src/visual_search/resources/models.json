@@ -3,22 +3,157 @@
   "model": {
     "id": "siglip2-so400m-patch16-naflex-openvino-fp16",
     "directory": "siglip2-so400m-patch16-naflex-openvino-fp16",
-    "source_repo": "",
-    "revision": "",
+    "source_repo": "WarrenYD/visual-search-openvino-models",
+    "revision": "0e01b8b5a686a24510178d52f5268d7f675d03df",
     "upstream": "google/siglip2-so400m-patch16-naflex",
     "max_num_patches": 256,
-    "files": []
+    "files": [
+      {
+        "name": "openvino_config.json",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/openvino_config.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/openvino_config.json?download=true",
+        "sha256": "fb195c286de12e56d50da615bdd6f3ed778744216c0fc7c3d61090e035f3b28b",
+        "size": 316
+      },
+      {
+        "name": "package-manifest.json",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/package-manifest.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/package-manifest.json?download=true",
+        "sha256": "224b625b982f2eccc6074d380ca88994f352ebbda88dce07dfa583479eb30d42",
+        "size": 1769
+      },
+      {
+        "name": "position_embedding.npy",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/position_embedding.npy",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/position_embedding.npy?download=true",
+        "sha256": "4a562ac14ad7a4eed71dc1e66aa7ec7aa63f081c8d6b10d53ce7f01331f6bed5",
+        "size": 589952
+      },
+      {
+        "name": "preprocessor_config.json",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/preprocessor_config.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/preprocessor_config.json?download=true",
+        "sha256": "358d5095768631277d3fa037b5be56106925dcd47f6eeeeb595a67274ce50fd7",
+        "size": 389
+      },
+      {
+        "name": "special_tokens_map.json",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/special_tokens_map.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/special_tokens_map.json?download=true",
+        "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351",
+        "size": 636
+      },
+      {
+        "name": "text_model.bin",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/text_model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/text_model.bin?download=true",
+        "sha256": "9a496314937be3b64a7de6b050cbba418e5adc618d48d57c5131b1ec7141696e",
+        "size": 1415566480
+      },
+      {
+        "name": "text_model.xml",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/text_model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/text_model.xml?download=true",
+        "sha256": "00efceab172714a77b01eca5322b592764ba5ffb483e7c8a75ab50f9076670a7",
+        "size": 1056153
+      },
+      {
+        "name": "tokenizer.model",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/tokenizer.model",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/tokenizer.model?download=true",
+        "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+        "size": 4241003
+      },
+      {
+        "name": "tokenizer_config.json",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/tokenizer_config.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/tokenizer_config.json?download=true",
+        "sha256": "d2343400f0f86133053325951b696df8fd0f53a007cf6a546e6c2b4361344f47",
+        "size": 40160
+      },
+      {
+        "name": "vision_model.bin",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/vision_model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/vision_model.bin?download=true",
+        "sha256": "1b0f70525174297c43ab26da4d7ec6c8ed11f4d591aa466c24b2766ae13872b9",
+        "size": 855186730
+      },
+      {
+        "name": "vision_model.xml",
+        "source_name": "siglip2-so400m-patch16-naflex-openvino-fp16/vision_model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/siglip2-so400m-patch16-naflex-openvino-fp16/vision_model.xml?download=true",
+        "sha256": "01cbea94ff94941dbd5b0beb78c1eea077b116292df916b1599ac5754ef8f3a5",
+        "size": 1102782
+      }
+    ]
   },
   "ocr_model": {
     "id": "pp-ocrv6-medium-openvino-fp16",
     "directory": "pp-ocrv6-medium-openvino-fp16",
-    "source_repo": "",
-    "revision": "",
+    "source_repo": "WarrenYD/visual-search-openvino-models",
+    "revision": "0e01b8b5a686a24510178d52f5268d7f675d03df",
     "upstream": [
       "PaddlePaddle/PP-OCRv6_medium_det_onnx",
       "PaddlePaddle/PP-OCRv6_medium_rec_onnx"
     ],
-    "files": []
+    "files": [
+      {
+        "name": "det_inference.yml",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/det_inference.yml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/det_inference.yml?download=true",
+        "sha256": "7298d5ead546584af2504d03355f881ac7a7bc0eb1e282d3e159277c1d0af871",
+        "size": 886
+      },
+      {
+        "name": "det_model.bin",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/det_model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/det_model.bin?download=true",
+        "sha256": "d03855692d5acd8a75264218f7fcd2d4505e0415b35c532d9c62c7d51788f8e8",
+        "size": 31347978
+      },
+      {
+        "name": "det_model.xml",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/det_model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/det_model.xml?download=true",
+        "sha256": "db1c0ff45034404e67287de2c842009c9088071901029e7edb17a306a6d486d0",
+        "size": 437167
+      },
+      {
+        "name": "openvino_config.json",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/openvino_config.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/openvino_config.json?download=true",
+        "sha256": "f30ccbbe0a422a26c9d2e0f3b44e7b0ed1c2264fadd6ba4537a754e284e1d6f5",
+        "size": 1061
+      },
+      {
+        "name": "package-manifest.json",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/package-manifest.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/package-manifest.json?download=true",
+        "sha256": "b41419b8a331c9bdff2c1584ab198b53874a6699fcb5f50f612d31fb75a6447a",
+        "size": 2311
+      },
+      {
+        "name": "rec_inference.yml",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/rec_inference.yml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/rec_inference.yml?download=true",
+        "sha256": "991b700facf5b50a7de193468207d5f4255b538dde0d312ae3b7c7a9b6873129",
+        "size": 150580
+      },
+      {
+        "name": "rec_model.bin",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/rec_model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/rec_model.bin?download=true",
+        "sha256": "0db4776a78e5cbec6c6106b9f2f077e6c7bfe0ee00589f4a4a603ca34748cd49",
+        "size": 38227210
+      },
+      {
+        "name": "rec_model.xml",
+        "source_name": "pp-ocrv6-medium-openvino-fp16/rec_model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/pp-ocrv6-medium-openvino-fp16/rec_model.xml?download=true",
+        "sha256": "3bc07acda4c658784522a62241c1bbda4afd21afe82968e5d1ff3a5743e3b8bc",
+        "size": 336119
+      }
+    ]
   },
   "yoloe_s": {
     "id": "yoloe-26s-pf-openvino-fp16",
@@ -26,9 +161,52 @@
     "upstream": "Ultralytics/YOLOE-26S-PF",
     "precision": "FP16",
     "family": "yoloe26_pf",
-    "source_repo": "",
-    "revision": "",
-    "files": []
+    "source_repo": "WarrenYD/visual-search-openvino-models",
+    "revision": "0e01b8b5a686a24510178d52f5268d7f675d03df",
+    "files": [
+      {
+        "name": "metadata.yaml",
+        "source_name": "yoloe-26s-pf-openvino-fp16/metadata.yaml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/metadata.yaml?download=true",
+        "sha256": "070b98e48b1f457c339bc0654028d3ff78af3c8ef4e1dbfd58fcf58fa99af9c6",
+        "size": 82286
+      },
+      {
+        "name": "model.bin",
+        "source_name": "yoloe-26s-pf-openvino-fp16/model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/model.bin?download=true",
+        "sha256": "1c0cab7d3b6ab477f971388294804215c56faea48caad9cd6ad66c77e7815c49",
+        "size": 24331376
+      },
+      {
+        "name": "model.xml",
+        "source_name": "yoloe-26s-pf-openvino-fp16/model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/model.xml?download=true",
+        "sha256": "e3f11eade70535729a2822d34b241a196e9317faab1bdcbbda623db9356f3894",
+        "size": 676309
+      },
+      {
+        "name": "package-manifest.json",
+        "source_name": "yoloe-26s-pf-openvino-fp16/package-manifest.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/package-manifest.json?download=true",
+        "sha256": "35a8712303810883b734739a5162d7afe59e4d9a307e7217b6dffc0d86c5fb0c",
+        "size": 1067
+      },
+      {
+        "name": "validation.json",
+        "source_name": "yoloe-26s-pf-openvino-fp16/validation.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/validation.json?download=true",
+        "sha256": "7f1ee694c639437e830ef7740bea2422ee329dd927e24f194c75b3f6e3188dc0",
+        "size": 792
+      },
+      {
+        "name": "vocabulary.json",
+        "source_name": "yoloe-26s-pf-openvino-fp16/vocabulary.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26s-pf-openvino-fp16/vocabulary.json?download=true",
+        "sha256": "7587b9f93be7797354c1833f77db3fb058db68f7e95640549641ced52cb7438f",
+        "size": 78610
+      }
+    ]
   },
   "yoloe_m": {
     "id": "yoloe-26m-pf-openvino-fp16",
@@ -36,9 +214,52 @@
     "upstream": "Ultralytics/YOLOE-26M-PF",
     "precision": "FP16",
     "family": "yoloe26_pf",
-    "source_repo": "",
-    "revision": "",
-    "files": []
+    "source_repo": "WarrenYD/visual-search-openvino-models",
+    "revision": "0e01b8b5a686a24510178d52f5268d7f675d03df",
+    "files": [
+      {
+        "name": "metadata.yaml",
+        "source_name": "yoloe-26m-pf-openvino-fp16/metadata.yaml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/metadata.yaml?download=true",
+        "sha256": "69883ba1213aeb73fb5d85cbc60f66731b11c5170ebc3346f600da042cfe9064",
+        "size": 77689
+      },
+      {
+        "name": "model.bin",
+        "source_name": "yoloe-26m-pf-openvino-fp16/model.bin",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/model.bin?download=true",
+        "sha256": "c633504bcbe5ae85ebe223286ca16e18a499369b04f0d745c6d828f0d2e5a213",
+        "size": 54137408
+      },
+      {
+        "name": "model.xml",
+        "source_name": "yoloe-26m-pf-openvino-fp16/model.xml",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/model.xml?download=true",
+        "sha256": "70df89d804b7c4b3f4d7db558f36a268e1ec85a66cbbcbd435f9c75968eb0c9d",
+        "size": 697231
+      },
+      {
+        "name": "package-manifest.json",
+        "source_name": "yoloe-26m-pf-openvino-fp16/package-manifest.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/package-manifest.json?download=true",
+        "sha256": "38ffc0e31c2f99c4309fdebfeb7f757fd5e4e6a73712859a671e38a2ce323102",
+        "size": 1029
+      },
+      {
+        "name": "validation.json",
+        "source_name": "yoloe-26m-pf-openvino-fp16/validation.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/validation.json?download=true",
+        "sha256": "ad919486d9ec9bfe89fbea2ace27e9df30d22da5a933a99e63e653339e477a66",
+        "size": 761
+      },
+      {
+        "name": "vocabulary.json",
+        "source_name": "yoloe-26m-pf-openvino-fp16/vocabulary.json",
+        "url": "https://huggingface.co/WarrenYD/visual-search-openvino-models/resolve/0e01b8b5a686a24510178d52f5268d7f675d03df/yoloe-26m-pf-openvino-fp16/vocabulary.json?download=true",
+        "sha256": "8ee48315f8f4a3c9f4b12e02368bd3163210c3d23b5e53c87d1c698eaaf414bc",
+        "size": 74021
+      }
+    ]
   },
   "vlm_int8": {
     "id": "qwen3.5-9b-int8-openvino",

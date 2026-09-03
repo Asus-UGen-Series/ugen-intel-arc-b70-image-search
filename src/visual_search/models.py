@@ -44,6 +44,7 @@ class ModelFile:
     url: str
     sha256: str
     size: int = 0
+    source_name: str = ""
 
 
 class ModelManager:
@@ -179,7 +180,7 @@ class ModelManager:
         from tqdm.auto import tqdm
 
         callback_lock = threading.Lock()
-        known = {item.name: item for item in self.files()}
+        known = {item.source_name or item.name: item for item in self.files()}
 
         class DownloadProgress(tqdm):
             def __init__(bar, *args, **kwargs):
@@ -203,7 +204,12 @@ class ModelManager:
             user_agent="VisualSearch/1.0",
         )
         for item in self.files():
+            source_name = item.source_name or item.name
+            source = self.root / source_name
             destination = self.root / item.name
+            if source != destination and source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source.replace(destination)
             if not destination.is_file():
                 raise FileNotFoundError(f"Downloaded model is missing: {item.name}")
             if item.size and destination.stat().st_size != item.size:

@@ -93,7 +93,10 @@ def windows_profile_from_project(project_root: Path) -> Path:
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=project_root / "release-models" / MODEL_ID)
+    parser.add_argument(
+        "--output", type=Path,
+        default=project_root / "release-models" / "visual-search-openvino-models" / MODEL_ID,
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--install-local", action="store_true")
     parser.add_argument("--no-install", action="store_true")

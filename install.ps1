@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = "1.0.0",
     [string]$BaseUrl = "https://github.com/REPLACE_WITH_OWNER/visual-search/releases/download",
     [string]$ExpectedSha256 = "REPLACE_WITH_RELEASE_SHA256"

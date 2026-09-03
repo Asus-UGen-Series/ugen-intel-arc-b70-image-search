@@ -123,7 +123,10 @@ def smoke_test(output: Path, device: str) -> dict[str, object]:
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=project_root / "release-models" / MODEL_ID)
+    parser.add_argument(
+        "--output", type=Path,
+        default=project_root / "release-models" / "visual-search-openvino-models" / MODEL_ID,
+    )
     parser.add_argument("--verify-device", default="CPU", help="CPU by default; use GPU only if OpenVINO GPU is visible in WSL")
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
