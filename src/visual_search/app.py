@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import shutil
 import sys
@@ -28,7 +29,10 @@ from .yolo_openvino import OpenVinoYoloEngine
 
 def configure_logging(paths: AppPaths) -> None:
     paths.ensure()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", handlers=[logging.FileHandler(paths.logs / "visual-search.log", encoding="utf-8"), logging.StreamHandler()])
+    handlers = [RotatingFileHandler(paths.logs / "visual-search.log", maxBytes=5 * 1024**2, backupCount=3, encoding="utf-8")]
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", handlers=handlers, force=True)
 
 
 def manifest_path() -> Path:
@@ -458,10 +462,15 @@ def main(argv: list[str] | None = None) -> int:
         return resume_index(paths)
     if args.evaluate_accuracy:
         return evaluate_accuracy(paths, args)
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QLockFile
+    from PySide6.QtWidgets import QApplication, QMessageBox
     from .ui import MainWindow, ModelSetupDialog, VlmChoiceDialog
     app = QApplication(sys.argv)
     app.setApplicationName("Visual Search")
+    instance_lock = QLockFile(str(paths.root / "application.lock"))
+    if not instance_lock.tryLock(0):
+        QMessageBox.information(None, "Visual Search 已開啟", "此資料庫已有 Visual Search 執行中。請使用已開啟的視窗；若正在關閉，請稍候再啟動。")
+        return 0
     config = AppConfig.load(paths.config)
     registry = create_model_registry(paths)
     manager = registry.manager("model")

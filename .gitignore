@@ -53,8 +53,13 @@ ocr-diagnostic-preview.png
 *.sig
 
 # Editor and operating-system state
+.claude/
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local-only regression harnesses
+tests/test_install_lifecycle.py
+tests/test_model_download_reuse.py

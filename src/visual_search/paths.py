@@ -17,7 +17,8 @@ class AppPaths:
 
     @classmethod
     def default(cls) -> "AppPaths":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "VisualSearch"
+        override = os.environ.get("VISUAL_SEARCH_DATA_DIR")
+        base = Path(override).resolve() if override else Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "VisualSearch"
         return cls(base, base / "metadata.db", base / "vectors.usearch", base / "thumbnails", base / "models", base / "logs", base / "config.json")
 
     def ensure(self) -> None:

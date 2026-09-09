@@ -81,10 +81,14 @@ class GpuScheduler:
         future: Future[T] = Future()
         with self._lock:
             fault_message = self._fault_message
+            if self._stopping.is_set():
+                future.set_exception(InferenceCancelled("GPU scheduler is shutting down"))
+                return future
+            if not fault_message:
+                self._queue.put(_WorkItem(int(priority), next(self._sequence), future, function, generation))
         if fault_message:
             future.set_exception(GpuRuntimeUnavailable(fault_message))
             return future
-        self._queue.put(_WorkItem(int(priority), next(self._sequence), future, function, generation))
         return future
 
     @contextmanager
@@ -125,7 +129,15 @@ class GpuScheduler:
         }
 
     def shutdown(self, wait: bool = True) -> None:
-        self._stopping.set()
+        with self._lock:
+            self._stopping.set()
+            while True:
+                try:
+                    pending = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if not pending.future.done():
+                    pending.future.set_exception(InferenceCancelled("GPU scheduler is shutting down"))
         with self._interaction_changed:
             self._interaction_changed.notify_all()
         self._queue.put(_WorkItem(99, next(self._sequence), Future(), lambda: None))
@@ -136,8 +148,10 @@ class GpuScheduler:
         while not self._stopping.is_set():
             item = self._queue.get()
             if self._stopping.is_set():
+                if not item.future.done():
+                    item.future.set_exception(InferenceCancelled("GPU scheduler is shutting down"))
                 break
-            if item.future.cancelled():
+            if not item.future.set_running_or_notify_cancel():
                 continue
             with self._lock:
                 fault_message = self._fault_message

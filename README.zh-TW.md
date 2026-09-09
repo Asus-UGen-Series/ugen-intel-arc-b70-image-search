@@ -129,7 +129,9 @@ dist/sbom.json
 
 ## 常見問題
 
-- 模型下載失敗時，請確認網路連線後重試；未完成的下載會自動接續。
+完整發行驗收請見[全新安裝檢查表](docs/FIRST_INSTALL_ACCEPTANCE.md)。可執行 `scripts/verify-packaged-app.ps1`，以隔離空白資料目錄測試獨立 EXE；這與乾淨 Windows 安裝及 GPU 驗收分開記錄。
+
+- 模型準備會先驗證並重用本機檔案；缺少完成標記時會做本機校驗與推論測試，不會整套重新下載。下載失敗時可恢復網路後重試，未完成檔案會接續。
 - 評測回報缺少圖片或 metadata 時，請確認 100 張 PNG 都存在，且仍保留 ComfyUI prompt metadata。
 - 評測回報索引未完成時，先將 `benchmarks/test100/images` 加入 Visual Search，等待背景分析完成。
 - GPU 記憶體不足時，關閉其他 Visual Search 或評測程序、改用 Qwen INT4，再接續索引。

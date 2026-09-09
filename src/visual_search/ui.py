@@ -91,6 +91,7 @@ class ModelDownloadWorker(QRunnable):
     def run(self):
         try:
             self.manager.download(lambda name, done, total: self.signals.progress.emit(name, done, total))
+            self.signals.progress.emit("本機檔案驗證完成，正在測試模型…", 0, 0)
             if self.manager.model_id == OCR_MODEL_ID:
                 from .ocr_openvino import OpenVinoPaddleOcrEngine
                 engine = OpenVinoPaddleOcrEngine(self.manager.root)
@@ -139,7 +140,7 @@ class ModelSetupDialog(QDialog):
         title = QLabel(model_title)
         title.setObjectName("sectionTitle")
         size_gb = manager.total_size / (1024 ** 3)
-        detail = QLabel(f"第一次使用需要下載約 {size_gb:.1f} GB。模型只下載一次，圖片不會上傳。")
+        detail = QLabel(f"模型總大小約 {size_gb:.1f} GB。會先驗證現有檔案，只下載缺少或損壞的部分。圖片不會上傳。")
         detail.setWordWrap(True)
         self.file_label = QLabel("等待開始…")
         self.file_label.setObjectName("muted")
@@ -163,14 +164,9 @@ class ModelSetupDialog(QDialog):
         self.start_download()
 
     def start_download(self):
-        required = int(self.manager.total_size * 1.2) + 2 * 1024 ** 3
-        free = shutil.disk_usage(self.manager.root.parent).free
-        if free < required:
-            self.on_failed(f"磁碟空間不足：需要約 {required / 1024**3:.1f} GB，目前可用 {free / 1024**3:.1f} GB。")
-            return
         self.retry.setEnabled(False)
         self.skip.setEnabled(False)
-        self.state.setText("正在下載並校驗模型，請保持網路連線…")
+        self.state.setText("正在檢查本機模型；驗證通過的檔案會直接重用，接著測試模型是否可用。")
         self.worker = ModelDownloadWorker(self.manager)
         self.worker.signals.progress.connect(self.on_progress)
         self.worker.signals.finished.connect(self.on_finished)
@@ -181,14 +177,19 @@ class ModelSetupDialog(QDialog):
     def on_progress(self, name: str, done: object, total: object):
         done, total = int(done), int(total)
         self.file_label.setText(f"{name} — {done / 1024**2:.0f} / {total / 1024**2:.0f} MB" if total else name)
-        self.progress.setValue(round(done / total * 1000) if total else 0)
+        # Per-file bytes are not total setup progress; only the smoke test can
+        # declare the package complete.
+        self.progress.setRange(0, 0)
 
     def on_finished(self):
+        self.progress.setRange(0, 1000)
         self.progress.setValue(1000)
         self.state.setText("模型驗證完成，可以開始使用。")
         self.accept()
 
     def on_failed(self, error: str):
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
         self.state.setText(f"模型尚未就緒：{error}\n可以重試，或暫時使用 OCR 與檔名搜尋。")
         self.retry.setText("重試")
         self.retry.setEnabled(True)
@@ -1873,6 +1874,9 @@ class MainWindow(QMainWindow):
         self.main.start_index(folder)
 
     def closeEvent(self, event):
+        self.controller.cancel()
+        if self.controller.scheduler is not None:
+            self.controller.scheduler.next_generation()
         self.main.stop_monitor()
         super().closeEvent(event)
 

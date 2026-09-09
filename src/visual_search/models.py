@@ -180,7 +180,24 @@ class ModelManager:
         from tqdm.auto import tqdm
 
         callback_lock = threading.Lock()
-        known = {item.source_name or item.name: item for item in self.files()}
+        pending = []
+        for item in self.files():
+            destination = self.root / item.name
+            if progress:
+                progress(f"檢查本機模型：{item.name}", 0, 0)
+            if (destination.is_file()
+                    and (not item.size or destination.stat().st_size == item.size)
+                    and self.checksum(destination) == item.sha256):
+                if progress:
+                    progress(f"已重用本機模型：{item.name}", item.size, item.size)
+                continue
+            pending.append(item)
+        if not pending:
+            return
+        known = {item.source_name or item.name: item for item in pending}
+        required = int(sum(item.size for item in pending) * 1.2) + 2 * 1024 ** 3
+        if shutil.disk_usage(self.root).free < required:
+            raise OSError(f"模型下載空間不足，需要約 {required / 1024**3:.1f} GB；已存在的模型會保留。")
 
         class DownloadProgress(tqdm):
             def __init__(bar, *args, **kwargs):
@@ -203,19 +220,19 @@ class ModelManager:
             tqdm_class=DownloadProgress,
             user_agent="VisualSearch/1.0",
         )
-        for item in self.files():
+        for item in pending:
             source_name = item.source_name or item.name
             source = self.root / source_name
             destination = self.root / item.name
-            if source != destination and source.is_file():
+            if not source.is_file():
+                raise FileNotFoundError(f"Downloaded model is missing: {item.name}")
+            if item.size and source.stat().st_size != item.size:
+                raise ValueError(f"File size mismatch: {item.name}")
+            if self.checksum(source) != item.sha256:
+                raise ValueError(f"SHA-256 mismatch: {item.name}")
+            if source != destination:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 source.replace(destination)
-            if not destination.is_file():
-                raise FileNotFoundError(f"Downloaded model is missing: {item.name}")
-            if item.size and destination.stat().st_size != item.size:
-                raise ValueError(f"File size mismatch: {item.name}")
-            if self.checksum(destination) != item.sha256:
-                raise ValueError(f"SHA-256 mismatch: {item.name}")
             if progress:
                 progress(item.name, item.size, item.size)
             destination.with_suffix(destination.suffix + ".part").unlink(missing_ok=True)

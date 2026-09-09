@@ -129,7 +129,9 @@ dist/sbom.json
 
 ## Troubleshooting
 
-- If a model download fails, confirm network access and retry; partial downloads resume automatically.
+For release validation, follow [Fresh-install acceptance](docs/FIRST_INSTALL_ACCEPTANCE.md). `scripts/verify-packaged-app.ps1` checks the bundled EXE using an isolated empty data directory. This is separate from clean Windows installation and GPU acceptance.
+
+- If a model download fails, retry after restoring network access. Existing files are checked locally and reused when their hashes match; a missing verification marker triggers validation and a model test, not a complete download.
 - If evaluation reports missing images or metadata, verify that all 100 benchmark PNG files are present and retain their ComfyUI prompt metadata.
 - If evaluation reports an incomplete index, add `benchmarks/test100/images` to Visual Search and wait for background analysis to finish.
 - If GPU memory is exhausted, close other Visual Search or evaluation processes, select Qwen INT4, and resume indexing.

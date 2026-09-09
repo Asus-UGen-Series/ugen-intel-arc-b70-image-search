@@ -6,4 +6,6 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 ".venv\Scripts\python.exe" launcher.py
-if errorlevel 1 pause
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" echo Visual Search exited with code %RESULT%.
+exit /b %RESULT%

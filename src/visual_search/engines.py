@@ -123,7 +123,7 @@ class OpenVinoSiglipEngine(EmbeddingEngine):
 
     def image(self, image: Path) -> Vector:
         with Image.open(image) as source:
-            output = self._image_from_pil(source.convert("RGB"))
+            output = self._image_from_pil(ImageOps.exif_transpose(source).convert("RGB"))
         return normalize_vector(output)
 
     def image_regions(self, image: Path, boxes) -> list[Vector]:
